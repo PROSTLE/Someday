@@ -1,0 +1,278 @@
+import "server-only";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { COVER_BUCKET, UPLOAD_BUCKET, createAdminClient } from "@/lib/supabase/admin";
+import { slugify } from "@/lib/slug";
+import { VIEW_LABELS, type ItemData, type View } from "@/lib/types";
+import { UserFacingError, pipelineConfig, type PipelineConfig } from "./config";
+import { createFoodImage, createListCover } from "./covers";
+import { baseData, enrichItem, type Enrichment, type ReelSummary } from "./enrich";
+import { extractItems, type ExtractedItem } from "./extract";
+import { sendInstagramMessage } from "./instagram";
+import { loadVideo } from "./media";
+import { deleteVideo, uploadVideo } from "./meta";
+import { assertBudget, recordFailedUsage, recordUsage } from "./usage";
+
+const HARD_LIMIT_MS = 280_000;
+const ENRICH_LIMIT_MS = 200_000;
+const STALE_AFTER_MS = 6 * 60_000;
+const MAX_COVERS_PER_REEL = 4;
+const MAX_FOOD_IMAGES_PER_REEL = 2;
+const GENERIC_ERROR = "Something went wrong while reading this Reel. Please retry.";
+
+type ReelRow = {
+  id: string;
+  user_id: string;
+  caption: string | null;
+  note: string | null;
+  media_path: string | null;
+  media_url: string | null;
+  attempts: number;
+};
+
+async function failStaleReels(admin: SupabaseClient) {
+  await admin
+    .from("reels")
+    .update({ status: "failed", error: "This Reel took too long. Please retry.", updated_at: new Date().toISOString() })
+    .eq("status", "watching")
+    .lt("updated_at", new Date(Date.now() - STALE_AFTER_MS).toISOString());
+}
+
+/** Only one run can move a Reel from received to watching. */
+async function claimReel(admin: SupabaseClient, reelId: string) {
+  const { data: current, error: readError } = await admin
+    .from("reels")
+    .select("attempts")
+    .eq("id", reelId)
+    .eq("status", "received")
+    .maybeSingle();
+  if (readError) throw new Error(`Reel read failed: ${readError.message}`);
+  if (!current) return null;
+
+  const { data, error } = await admin
+    .from("reels")
+    .update({ status: "watching", error: null, attempts: current.attempts + 1, updated_at: new Date().toISOString() })
+    .eq("id", reelId)
+    .eq("status", "received")
+    .select("id, user_id, caption, note, media_path, media_url, attempts")
+    .maybeSingle();
+  if (error) throw new Error(`Reel claim failed: ${error.message}`);
+  return data as ReelRow | null;
+}
+
+/** Finds or creates a list for each item. A list only ever holds one view. */
+async function listIdsFor(admin: SupabaseClient, userId: string, items: ExtractedItem[]) {
+  const { data, error } = await admin.from("lists").select("id, slug, view").eq("user_id", userId);
+  if (error) throw new Error(`List read failed: ${error.message}`);
+  const known = new Map((data ?? []).map((list) => [list.slug as string, list as { id: string; view: View }]));
+
+  const ids: (string | null)[] = [];
+  for (const item of items) {
+    let name = item.list_name.trim().slice(0, 60);
+    let slug = slugify(name);
+    if (!slug) {
+      ids.push(null);
+      continue;
+    }
+    const clash = known.get(slug);
+    if (clash && clash.view !== item.view) {
+      name = `${name} · ${VIEW_LABELS[item.view]}`;
+      slug = slugify(name);
+    }
+    let list = known.get(slug);
+    if (!list) {
+      const { data: created, error: insertError } = await admin
+        .from("lists")
+        .upsert({ user_id: userId, name, slug, view: item.view }, { onConflict: "user_id,slug" })
+        .select("id, view")
+        .single();
+      if (insertError) throw new Error(`List create failed: ${insertError.message}`);
+      list = created as { id: string; view: View };
+      known.set(slug, list);
+    }
+    ids.push(list.id);
+  }
+  return ids;
+}
+
+async function enrichAll(
+  config: PipelineConfig,
+  admin: SupabaseClient,
+  reel: ReelRow,
+  items: ExtractedItem[],
+  summary: ReelSummary,
+  startedAt: number,
+  signal: AbortSignal,
+) {
+  const results: Enrichment[] = [];
+  let searches = 0;
+
+  for (const item of items) {
+    const needsSearch = item.lookup === "place" || item.lookup === "date" || item.lookup === "product";
+    const inTime = Date.now() - startedAt < ENRICH_LIMIT_MS;
+    let allowSearch = needsSearch && inTime && searches < config.maxSearchesPerReel;
+    if (allowSearch) {
+      try {
+        await assertBudget(config, admin);
+      } catch {
+        allowSearch = false;
+      }
+    }
+
+    let result: Enrichment;
+    try {
+      result = await enrichItem(config, admin, item, summary, allowSearch, signal);
+    } catch (error) {
+      // One failed lookup shouldn't lose the Reel. The item stays, flagged for a person.
+      console.error(`Enrichment failed for reel ${reel.id}:`, error instanceof Error ? error.message : error);
+      await recordFailedUsage(config, admin, error, { userId: reel.user_id, reelId: reel.id, kind: "search" });
+      result = { data: baseData(item, summary), dueAt: null, needsReview: true, usages: [] };
+    }
+    if (result.usages.some((usage) => usage.searchQueries > 0)) searches += 1;
+    for (const usage of result.usages) {
+      await recordUsage(config, admin, { userId: reel.user_id, reelId: reel.id, kind: "search", usage });
+    }
+    results.push(result);
+  }
+  return results;
+}
+
+async function addMissingCovers(
+  config: PipelineConfig,
+  admin: SupabaseClient,
+  reel: ReelRow,
+  listIds: (string | null)[],
+  signal: AbortSignal,
+) {
+  try {
+    const { data: existing } = await admin.storage.from(COVER_BUCKET).list(reel.user_id);
+    const covered = new Set((existing ?? []).map((file) => file.name.replace(/\.jpeg$/, "")));
+    const missing = [...new Set(listIds.filter((id): id is string => Boolean(id) && !covered.has(id as string)))];
+    const { data: lists } = await admin.from("lists").select("id, name").in("id", missing.slice(0, MAX_COVERS_PER_REEL));
+    await Promise.all(
+      (lists ?? []).map((list) =>
+        createListCover(config, admin, { userId: reel.user_id, listId: list.id, name: list.name, reelId: reel.id }, signal),
+      ),
+    );
+  } catch (error) {
+    console.error(`Cover failed for reel ${reel.id}:`, error instanceof Error ? error.message : error);
+  }
+}
+
+async function addFoodImages(
+  config: PipelineConfig,
+  admin: SupabaseClient,
+  reel: ReelRow,
+  saved: { id: string; title: string; data: ItemData }[],
+  signal: AbortSignal,
+) {
+  const dishes = saved.filter((item) => item.data.ingredients?.length && !item.data.image_url).slice(0, MAX_FOOD_IMAGES_PER_REEL);
+  await Promise.all(
+    dishes.map(async (dish) => {
+      try {
+        const url = await createFoodImage(config, admin, { userId: reel.user_id, itemId: dish.id, title: dish.title, reelId: reel.id }, signal);
+        await admin.from("items").update({ data: { ...dish.data, image_url: url, image_is_ai: true } }).eq("id", dish.id);
+      } catch (error) {
+        console.error(`Food image failed for ${dish.id}:`, error instanceof Error ? error.message : error);
+      }
+    }),
+  );
+}
+
+async function run(config: PipelineConfig, admin: SupabaseClient, reel: ReelRow, signal: AbortSignal) {
+  const startedAt = Date.now();
+  await assertBudget(config, admin);
+
+  const { data: lists, error: listError } = await admin.from("lists").select("name").eq("user_id", reel.user_id);
+  if (listError) throw new Error(`List read failed: ${listError.message}`);
+
+  const video = await loadVideo(admin, reel, signal);
+  const fileId = await uploadVideo(config, video, signal);
+
+  let extracted: Awaited<ReturnType<typeof extractItems>>;
+  try {
+    extracted = await extractItems(
+      config,
+      { fileId, caption: reel.caption, note: reel.note, listNames: (lists ?? []).map((list) => list.name) },
+      signal,
+    );
+  } catch (error) {
+    await recordFailedUsage(config, admin, error, { userId: reel.user_id, reelId: reel.id, kind: "extract" });
+    throw error;
+  } finally {
+    await deleteVideo(config, fileId).catch((error) => console.error(`Video delete failed for ${fileId}:`, error));
+  }
+  await recordUsage(config, admin, { userId: reel.user_id, reelId: reel.id, kind: "extract", usage: extracted.usage });
+
+  const items = extracted.items.filter((item) => item.title.trim());
+  if (items.length === 0) throw new UserFacingError("Tick couldn’t find anything to save in this Reel.");
+
+  const summary: ReelSummary = {
+    recap: extracted.recap?.trim() || null,
+    commentSummary: extracted.comment_summary?.trim() || null,
+    captionSummary: extracted.caption_summary?.trim() || null,
+  };
+  const enrichments = await enrichAll(config, admin, reel, items, summary, startedAt, signal);
+  const listIds = await listIdsFor(admin, reel.user_id, items);
+
+  const enrichedAt = new Date().toISOString();
+  const { data: saved, error } = await admin.from("items").insert(
+    items.map((item, index) => ({
+      user_id: reel.user_id,
+      reel_id: reel.id,
+      list_id: listIds[index],
+      title: item.title.trim(),
+      summary: item.summary?.trim() || null,
+      evidence: `${item.evidence_source.replaceAll("_", " ")}: ${item.evidence}`,
+      data: { ...enrichments[index].data, enriched_at: enrichedAt },
+      due_at: enrichments[index].dueAt,
+      needs_review: enrichments[index].needsReview,
+    })),
+  ).select("id, title, data");
+  if (error) throw new Error(`Item save failed: ${error.message}`);
+  await Promise.all([
+    addMissingCovers(config, admin, reel, listIds, signal),
+    addFoodImages(config, admin, reel, saved ?? [], signal),
+  ]);
+  return items;
+}
+
+async function removeStoredVideo(admin: SupabaseClient, path: string | null) {
+  if (!path) return;
+  const { error } = await admin.storage.from(UPLOAD_BUCKET).remove([path]);
+  if (error) console.error(`Stored video delete failed for ${path}:`, error.message);
+}
+
+async function instagramIdFor(admin: SupabaseClient, userId: string) {
+  const { data } = await admin.from("profiles").select("instagram_id").eq("id", userId).maybeSingle();
+  return (data?.instagram_id as string | undefined) ?? null;
+}
+
+export async function processReel(reelId: string) {
+  const admin = createAdminClient();
+  await failStaleReels(admin);
+  const reel = await claimReel(admin, reelId);
+  if (!reel) return;
+
+  let reply: string;
+  try {
+    const items = await run(pipelineConfig(), admin, reel, AbortSignal.timeout(HARD_LIMIT_MS));
+    const { error } = await admin
+      .from("reels")
+      .update({ status: "done", error: null, media_path: null, media_url: null, updated_at: new Date().toISOString() })
+      .eq("id", reel.id);
+    if (error) throw new Error(`Reel update failed: ${error.message}`);
+    await removeStoredVideo(admin, reel.media_path);
+    reply = `Saved ${items.length} ${items.length === 1 ? "item" : "items"} from your Reel.`;
+  } catch (error) {
+    console.error(`Reel ${reel.id} failed:`, error instanceof Error ? error.message : error);
+    const message = error instanceof UserFacingError ? error.message : GENERIC_ERROR;
+    await admin
+      .from("reels")
+      .update({ status: "failed", error: message, updated_at: new Date().toISOString() })
+      .eq("id", reel.id);
+    reply = message;
+  }
+
+  const instagramId = reel.media_url ? await instagramIdFor(admin, reel.user_id) : null;
+  if (instagramId) await sendInstagramMessage(instagramId, reply);
+}
