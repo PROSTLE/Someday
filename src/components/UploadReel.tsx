@@ -49,7 +49,7 @@ export function UploadReel() {
   return (
     <section data-surface className="rounded-[14px] border border-edge bg-card p-4">
       <h2 className="font-serif text-[22px]">Upload a video</h2>
-      <p className="text-sm text-muted">MP4, up to 50 MB. In your screen recording, open the caption and scroll the comments, and Tick will read them too.</p>
+      <p className="text-sm text-muted">Have a video saved on your device? Choose an MP4 up to 50 MB and Tick will sort it, just like a Reel you share.</p>
       <label className="mt-3 flex flex-col gap-1 text-sm font-medium">
         Why are you saving it? (optional)
         <input

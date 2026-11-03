@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useSyncExternalStore } from "react";
+import { quickAction } from "@/lib/quick";
 import type { Item, ListWithCount, Reel } from "@/lib/types";
 import { HomeShelf } from "./HomeShelf";
 import { Icon } from "./Icon";
@@ -20,6 +21,29 @@ function metaFor(item: Item) {
     parts.push(`due ${new Date(item.due_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`);
   }
   return parts.join(" · ");
+}
+
+/**
+ * Picks a varied few for today: one from each list in turn, items with a one-tap action first,
+ * so "Today" reads like "watch this, try that, go here" rather than three notes from one Reel.
+ */
+function pickForToday(undated: Item[], count: number) {
+  const byList = new Map<string, Item[]>();
+  for (const item of undated) {
+    const key = item.list_id ?? "none";
+    byList.set(key, [...(byList.get(key) ?? []), item]);
+  }
+  const queues = [...byList.values()].map((queue) =>
+    [...queue].sort((a, b) => Number(Boolean(quickAction(b))) - Number(Boolean(quickAction(a)))),
+  );
+  const picked: Item[] = [];
+  while (picked.length < count && queues.some((queue) => queue.length)) {
+    for (const queue of queues) {
+      const next = queue.shift();
+      if (next && picked.length < count) picked.push(next);
+    }
+  }
+  return picked;
 }
 
 function greeting(hour: number) {
@@ -64,7 +88,7 @@ export function HomeBoard({
   const open = items.filter((i) => i.status === "todo");
   const dueNow = open.filter((i) => i.due_at && new Date(i.due_at) <= endOfDay);
   const undated = open.filter((i) => !i.due_at);
-  const filler = undated.slice(0, Math.max(0, TODAY_TARGET - dueNow.length));
+  const filler = pickForToday(undated, Math.max(0, TODAY_TARGET - dueNow.length));
   const fillerIds = new Set(filler.map((i) => i.id));
   const doneToday = items.filter((i) => i.done_at && new Date(i.done_at) >= startOfDay);
   const today = [...dueNow, ...filler, ...doneToday];
@@ -101,8 +125,6 @@ export function HomeBoard({
           </Link>
         )}
 
-        <div className="mt-5 xl:hidden"><UploadReel /></div>
-
         <div className="mt-6">
           {items.length === 0 ? (
             <EmptyState title="Your list is empty">
@@ -136,6 +158,8 @@ export function HomeBoard({
         </div>
 
         <HomeShelf items={items} lists={lists} covers={covers} />
+        {/* Sharing from Instagram is the main way in, so the upload sits below what's saved. */}
+        <div className="mt-8 xl:hidden"><UploadReel /></div>
       </div>
 
       <aside className="hidden w-[300px] shrink-0 flex-col gap-5 xl:flex">

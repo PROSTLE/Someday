@@ -3,8 +3,11 @@
 import Link from "next/link";
 import { useOptimistic, useRef, useState, useTransition } from "react";
 import { setItemDone } from "@/app/app/actions";
+import { quickAction } from "@/lib/quick";
 import type { Item } from "@/lib/types";
 import { Bookmark } from "./Bookmark";
+import { Icon } from "./Icon";
+import { RemoteImage } from "./RemoteImage";
 
 const UNDO_MS = 5000;
 
@@ -14,6 +17,8 @@ export function TaskRow({ item, meta }: { item: Item; meta: string }) {
   const [undo, setUndo] = useState(false);
   const [error, setError] = useState("");
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // The one thing to do next, so a busy person can act straight from the list.
+  const action = item.status === "todo" ? quickAction(item) : null;
 
   const change = (next: boolean) => {
     setError("");
@@ -41,6 +46,31 @@ export function TaskRow({ item, meta }: { item: Item; meta: string }) {
         <p className="truncate text-sm text-muted">{meta}</p>
         {error && <p role="alert" className="text-sm text-coral">{error}</p>}
       </div>
+      {action && !done && !undo && (
+        action.external ? (
+          <a
+            href={action.href}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={action.label}
+            title={action.label}
+            className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-full border border-edge bg-card px-3 text-sm font-semibold hover:bg-tint"
+          >
+            {action.logo ? <RemoteImage src={action.logo} alt="" className="size-5 rounded" /> : <Icon name={action.icon} size={16} />}
+            <span className="hidden max-w-28 truncate sm:inline">{action.short}</span>
+          </a>
+        ) : (
+          <Link
+            href={action.href}
+            aria-label={action.label}
+            title={action.label}
+            className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-full border border-edge bg-card px-3 text-sm font-semibold hover:bg-tint"
+          >
+            <Icon name={action.icon} size={16} />
+            <span className="hidden max-w-28 truncate sm:inline">{action.short}</span>
+          </Link>
+        )
+      )}
       {undo && (
         <button type="button" onClick={() => change(false)} className="min-h-11 px-2 font-semibold underline">
           Undo
