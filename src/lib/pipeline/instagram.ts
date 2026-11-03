@@ -17,7 +17,7 @@ export type InstagramEvent = {
     attachments?: InstagramAttachment[];
     referral?: { ref?: string };
   };
-  postback?: { referral?: { ref?: string } };
+  postback?: { referral?: { ref?: string }; payload?: string; title?: string };
   referral?: { ref?: string };
 };
 
@@ -76,13 +76,14 @@ export async function lookupReelVideo(reelVideoId: string) {
 /**
  * Instagram API with Unified Login: the token is a business system-user token, so calls go to
  * graph.facebook.com with the bot's Instagram account ID. `/me` would be the system user, not the bot.
+ * Returns whether Instagram accepted the message.
  */
-export async function sendInstagramMessage(recipientId: string, text: string) {
+async function sendMessage(recipientId: string, message: Record<string, unknown>) {
   const token = process.env.INSTAGRAM_ACCESS_TOKEN;
   const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
   if (!token || !accountId) {
     console.error("Instagram reply skipped: INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCOUNT_ID is not set");
-    return;
+    return false;
   }
   const version = process.env.INSTAGRAM_API_VERSION;
   const url = `https://graph.facebook.com/${version ? `${version}/` : ""}${accountId}/messages`;
@@ -90,13 +91,46 @@ export async function sendInstagramMessage(recipientId: string, text: string) {
     const response = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ recipient: { id: recipientId }, message: { text: truncateToBytes(text, REPLY_LIMIT_BYTES) } }),
+      body: JSON.stringify({ recipient: { id: recipientId }, message }),
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       console.error(`Instagram reply failed with HTTP ${response.status}: ${detail.slice(0, 300)}`);
     }
+    return response.ok;
   } catch (error) {
     console.error("Instagram reply failed:", error instanceof Error ? error.message : error);
+    return false;
   }
+}
+
+export async function sendInstagramMessage(recipientId: string, text: string) {
+  return sendMessage(recipientId, { text: truncateToBytes(text, REPLY_LIMIT_BYTES) });
+}
+
+/** A card in Instagram's generic template. Instagram caps titles and subtitles at 80 characters. */
+export type CardButton = { type: "web_url"; title: string; url: string } | { type: "postback"; title: string; payload: string };
+export type Card = { title: string; subtitle?: string; image_url?: string; default_url?: string; buttons: CardButton[] };
+
+const TEMPLATE_TEXT_LIMIT = 80;
+const BUTTON_TITLE_LIMIT = 20;
+const MAX_CARDS = 10;
+const MAX_BUTTONS = 3;
+
+const clip = (text: string, limit: number) => (text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text);
+
+/**
+ * Sends up to ten swipeable cards with buttons. Instagram doesn't show these on desktop,
+ * so callers send a plain text line first.
+ */
+export async function sendInstagramCards(recipientId: string, cards: Card[]) {
+  if (cards.length === 0) return true;
+  const elements = cards.slice(0, MAX_CARDS).map((card) => ({
+    title: clip(card.title, TEMPLATE_TEXT_LIMIT),
+    ...(card.subtitle ? { subtitle: clip(card.subtitle, TEMPLATE_TEXT_LIMIT) } : {}),
+    ...(card.image_url ? { image_url: card.image_url } : {}),
+    ...(card.default_url ? { default_action: { type: "web_url", url: card.default_url } } : {}),
+    buttons: card.buttons.slice(0, MAX_BUTTONS).map((button) => ({ ...button, title: clip(button.title, BUTTON_TITLE_LIMIT) })),
+  }));
+  return sendMessage(recipientId, { attachment: { type: "template", payload: { template_type: "generic", elements } } });
 }

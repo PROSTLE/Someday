@@ -2,13 +2,14 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { COVER_BUCKET, UPLOAD_BUCKET, createAdminClient } from "@/lib/supabase/admin";
 import { slugify } from "@/lib/slug";
-import { VIEW_LABELS, type ItemData, type View } from "@/lib/types";
+import { ITEM_SELECT, VIEW_LABELS, type Item, type ItemData, type View } from "@/lib/types";
 import { UserFacingError, pipelineConfig, type PipelineConfig } from "./config";
 import { createFoodImage, createListCover } from "./covers";
 import { baseData, enrichItem, type Enrichment, type ReelSummary } from "./enrich";
 import { addResources } from "./resources";
 import { extractItems, type ExtractedItem } from "./extract";
 import { researchReel, type ReelResearch } from "./research";
+import { pickNudge, replyWithItems } from "./dm";
 import { sendInstagramMessage } from "./instagram";
 import { loadMedia } from "./media";
 import { deleteVideo, uploadVideo } from "./meta";
@@ -190,7 +191,10 @@ async function addFoodImages(
     dishes.map(async (dish) => {
       try {
         const url = await createFoodImage(config, admin, { userId: reel.user_id, itemId: dish.id, title: dish.title, reelId: reel.id }, signal);
-        await admin.from("items").update({ data: { ...dish.data, image_url: url, image_is_ai: true } }).eq("id", dish.id);
+        const data = { ...dish.data, image_url: url, image_is_ai: true };
+        await admin.from("items").update({ data }).eq("id", dish.id);
+        // Keep the in-memory copy current, so the Instagram reply shows the picture too.
+        dish.data = data;
       } catch (error) {
         console.error(`Food image failed for ${dish.id}:`, error instanceof Error ? error.message : error);
       }
@@ -238,11 +242,15 @@ async function run(config: PipelineConfig, admin: SupabaseClient, reel: ReelRow,
     throw new UserFacingError("Tick couldn’t find out what this Reel is about. Try adding a note when you share it.");
   }
 
+  // The note typed with a shared Reel can arrive a moment after it, so read it again now.
+  const { data: latest } = await admin.from("reels").select("note").eq("id", reel.id).maybeSingle();
+  const note = (latest?.note as string | null | undefined) ?? reel.note;
+
   let extracted: Awaited<ReturnType<typeof extractItems>>;
   try {
     extracted = await extractItems(
       config,
-      { fileId, image, caption: reel.caption, note: reel.note, listNames: (lists ?? []).map((list) => list.name), research },
+      { fileId, image, caption: reel.caption, note, listNames: (lists ?? []).map((list) => list.name), research },
       signal,
     );
   } catch (error) {
@@ -281,13 +289,13 @@ async function run(config: PipelineConfig, admin: SupabaseClient, reel: ReelRow,
       due_at: enrichments[index].dueAt,
       needs_review: enrichments[index].needsReview,
     })),
-  ).select("id, title, data");
+  ).select(ITEM_SELECT);
   if (error) throw new Error(`Item save failed: ${error.message}`);
   await Promise.all([
     addMissingCovers(config, admin, reel, listIds, signal),
     addFoodImages(config, admin, reel, saved ?? [], signal),
   ]);
-  return items;
+  return (saved ?? []) as Item[];
 }
 
 async function removeStoredVideo(admin: SupabaseClient, path: string | null) {
@@ -308,16 +316,21 @@ export async function processReel(reelId: string) {
   if (!reel) return;
 
   let reply: string;
+  let saved: Item[] = [];
   try {
     const items = await run(pipelineConfig(), admin, reel, AbortSignal.timeout(HARD_LIMIT_MS));
+    saved = items;
     const { error } = await admin
       .from("reels")
       .update({ status: "done", error: null, media_path: null, media_url: null, updated_at: new Date().toISOString() })
       .eq("id", reel.id);
     if (error) throw new Error(`Reel update failed: ${error.message}`);
     await removeStoredVideo(admin, reel.media_path);
-    const count = `${items.length} ${items.length === 1 ? "item" : "items"}`;
-    reply = `Saved ${count} from your Reel.`;
+    const ready = items.filter((item) => !item.needs_review);
+    const unsure = items.length - ready.length;
+    const count = `${ready.length} ${ready.length === 1 ? "thing" : "things"}`;
+    reply = ready.length ? `Saved ${count} from your Reel ✓` : "Saved your Reel.";
+    if (unsure) reply += ` ${unsure} ${unsure === 1 ? "needs" : "need"} a quick look in the app.`;
   } catch (error) {
     console.error(`Reel ${reel.id} failed:`, error instanceof Error ? error.message : error);
     const message = error instanceof UserFacingError ? error.message : GENERIC_ERROR;
@@ -330,5 +343,13 @@ export async function processReel(reelId: string) {
 
   // Only Reels that came in by DM get a DM back. Web uploads have no message ID.
   const instagramId = reel.message_id ? await instagramIdFor(admin, reel.user_id) : null;
-  if (instagramId) await sendInstagramMessage(instagramId, reply);
+  if (!instagramId) return;
+  if (saved.length === 0) {
+    await sendInstagramMessage(instagramId, reply);
+    return;
+  }
+  // Cards with one-tap actions, plus one older save brought back so it isn't forgotten.
+  const ready = saved.filter((item) => !item.needs_review);
+  const nudge = await pickNudge(admin, reel.user_id, saved.map((item) => item.id));
+  await replyWithItems(instagramId, reply, ready.slice(0, 9), nudge);
 }

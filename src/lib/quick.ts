@@ -33,7 +33,8 @@ export function quickAction(item: Item): QuickAction | null {
     return { kind: "watch", label: "Watch the trailer", short: "Trailer", href: youtubeUrl(data.trailer_key), external: true, icon: "play" };
   }
   if (data.start) {
-    return { kind: "learn", label: data.start.label, short: data.start.label.split(" ").slice(0, 2).join(" "), href: data.start.url, external: true, icon: "arrow" };
+    // The label can be long ("Set up Unity Matchmaker"), so small cards just say "Start".
+    return { kind: "learn", label: data.start.label, short: "Start", href: data.start.url, external: true, icon: "arrow" };
   }
   if (data.videos?.length) {
     return { kind: "learn", label: "Watch a lesson", short: "Lesson", href: youtubeUrl(data.videos[0].id), external: true, icon: "play" };
