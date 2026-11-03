@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { ListSettings } from "@/components/ListSettings";
+import { ShareList } from "@/components/ShareList";
 import { RemoteImage } from "@/components/RemoteImage";
 import { EmptyState, PageTitle } from "@/components/ui";
 import { ListView } from "@/components/views/ListView";
@@ -7,6 +8,7 @@ import { coverUrls } from "@/lib/pipeline/covers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireUser } from "@/lib/supabase/server";
 import { itemVisual } from "@/lib/quick";
+import { shareToken } from "@/lib/share";
 import { ITEM_SELECT, type Item, type List } from "@/lib/types";
 
 export default async function ListPage(props: PageProps<"/app/lists/[slug]">) {
@@ -51,7 +53,10 @@ export default async function ListPage(props: PageProps<"/app/lists/[slug]">) {
           <p>Items appear here when Tick finds something that belongs in this list.</p>
         </EmptyState>
       ) : (
-        <ListView list={list as List} items={items} />
+        <>
+          {open > 0 && <ShareList path={`/s/${shareToken(list.id)}`} name={list.name} />}
+          <ListView list={list as List} items={items} />
+        </>
       )}
       <ListSettings id={list.id} name={list.name} />
     </>

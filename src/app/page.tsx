@@ -6,7 +6,7 @@ import { ButtonLink, Logo } from "@/components/ui";
 
 const STEPS = [
   ["Send a Reel", "Share it to Tick in Instagram, just like sending it to a friend.", "instagram", "bg-t-blue"],
-  ["Tick watches it", "Video, speech and on-screen text. One Reel can become many items.", "play", "bg-t-yellow"],
+  ["Tick looks it up", "The caption, the post’s picture and what the web says about it. One Reel can become many items.", "play", "bg-t-yellow"],
   ["It lands on your list", "Sorted, ready and easy to tick off.", "list", "bg-t-mint"],
 ];
 
@@ -22,7 +22,7 @@ const VIEWS = [
 ];
 
 const PRIVACY = [
-  ["Only you see your list", "Other people can never open it."],
+  ["Only you see your lists", "Unless you share one. Shared lists show titles and links, never your notes."],
   ["Videos don’t stay", "We read the Reel, then delete our copy."],
   ["Your choice, always", "Delete everything in one tap."],
 ];
@@ -51,7 +51,7 @@ export default function Landing() {
                 Now do it.
               </h1>
               <p className="mt-5 max-w-xl text-xl text-muted">
-                Send any Reel to Someday in a DM. Tick watches it, finds what matters and puts it on your to-do list.
+                Send any Reel to Someday in a DM. Tick works out what it’s about, finds what matters and puts it on your to-do list.
               </p>
               <div className="mt-7 flex flex-wrap gap-3">
                 <ButtonLink href="/signin">
