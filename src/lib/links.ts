@@ -1,7 +1,11 @@
 import type { Item } from "./types";
 
 export function directionsUrl(item: Item) {
-  const query = [item.title, item.data.address].filter(Boolean).join(", ");
+  const address = item.data.address;
+  // OpenStreetMap addresses often start with the place's name already.
+  const query = address?.toLowerCase().startsWith(item.title.toLowerCase())
+    ? address
+    : [item.title, address].filter(Boolean).join(", ");
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
 }
 

@@ -665,6 +665,63 @@ export async function geocode(
   return point;
 }
 
+const nameWords = (text: string) =>
+  new Set(text.toLowerCase().normalize("NFKD").replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((word) => word.length >= 4));
+
+/**
+ * Finds a named place on OpenStreetMap when web search couldn't prove an address. It tries the
+ * name with the full area, then with just the city, and keeps a result only if OpenStreetMap's
+ * name for it shares the saved name's distinctive words, so a pin is never a guess.
+ */
+export async function findOnMap(
+  config: PipelineConfig,
+  name: string,
+  area: string | null,
+  signal: AbortSignal,
+): Promise<{ lat: number; lng: number; address: string; osm_url: string } | null> {
+  if (!config.nominatimUrl || !area) return null;
+  const parts = area.split(",").map((part) => part.trim()).filter(Boolean);
+  const queries = [...new Set([[name, ...parts].join(", "), parts.length > 1 ? `${name}, ${parts.at(-1)}` : null])].filter(
+    (query): query is string => Boolean(query),
+  );
+  const wanted = nameWords(name);
+  for (const query of queries) {
+    const params = new URLSearchParams({ q: query, format: "jsonv2", limit: "3" });
+    const response = await fetchNominatim(`${config.nominatimUrl}/search?${params}`, signal);
+    if (!response.ok) return null;
+    const hits = (await response.json()) as { name?: string; lat?: string; lon?: string; display_name?: string; osm_type?: string; osm_id?: number }[];
+    // Two shared words when the name has two, so "Leopold Cafe" can't match just any café.
+    const needed = Math.min(2, wanted.size);
+    const hit = hits.find(
+      (candidate) =>
+        needed > 0 &&
+        candidate.lat &&
+        candidate.lon &&
+        [...nameWords(candidate.name ?? "")].filter((word) => wanted.has(word)).length >= needed,
+    );
+    if (hit?.lat && hit.lon && hit.display_name) {
+      return {
+        lat: Number(hit.lat),
+        lng: Number(hit.lon),
+        address: hit.display_name,
+        osm_url: `https://www.openstreetmap.org/${hit.osm_type}/${hit.osm_id}`,
+      };
+    }
+  }
+  return null;
+}
+
+async function placeFromMap(config: PipelineConfig, item: ExtractedItem, signal: AbortSignal): Promise<ItemData> {
+  const found = await findOnMap(config, item.title, item.place_area, signal).catch(() => null);
+  if (!found) return {};
+  return {
+    address: found.address,
+    lat: found.lat,
+    lng: found.lng,
+    facts: [{ label: "Address", value: found.address, source: "OpenStreetMap", url: found.osm_url }],
+  };
+}
+
 function parseDate(value: string | null) {
   if (!value) return null;
   const date = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:00Z` : value);
@@ -726,7 +783,10 @@ export async function enrichItem(
   }
 
   // Dates that weren't verified must be checked by a person.
-  if (!allowSearch) return { ...plain({}), needsReview: lowConfidence || item.lookup === "date" };
+  if (!allowSearch) {
+    const mapped = item.lookup === "place" ? await placeFromMap(config, item, signal) : {};
+    return { ...plain(mapped), needsReview: lowConfidence || item.lookup === "date" };
+  }
 
   const found = await webLookup(config, item.lookup, item, signal);
   const extra: ItemData = {
@@ -756,6 +816,11 @@ export async function enrichItem(
       needsReview: lowConfidence,
       usages: [found.usage],
     };
+  }
+
+  // Search couldn't prove an address, so try OpenStreetMap by name and area.
+  if (item.lookup === "place") {
+    return { data: merge(data, { ...extra, ...(await placeFromMap(config, item, signal)) }), dueAt: stated, needsReview: lowConfidence, usages: [found.usage] };
   }
 
   if (item.lookup === "product" && found.sourceUrl) {

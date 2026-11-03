@@ -100,6 +100,7 @@ Accuracy:
 
 Items:
 - Create one item for each separate thing. A video listing seven films creates seven items.
+- Concepts or tips taught by one tutorial or explainer form one item, named for what it teaches, with each concept in "points". Split them only when each is something to do on its own, such as a film, place, product, recipe, event or coding problem.
 - If the video has nothing to act on or remember, return an empty "items" array.
 - "recap" is one or two plain sentences on what happens in the video and what the person is meant to take from it.
 - "comment_summary" sums up viewer comments only if they are visible in the video. Otherwise null. Never guess what comments say.
@@ -121,7 +122,7 @@ Lookups:
 - "title": a film or show. "book": a book. "music": a song. "place": a specific named place. "date": something with a deadline or date.
 - For films, shows and books, "title" is the official title alone: never add a year, season, episode or part number. Put those in "summary", e.g. title "Stranger Things", summary "Season 2 of the Netflix series (2017)".
 - "product": a specific named product. Otherwise "none".
-- "place_area": the city or area, only if stated.
+- "place_area": where the place is, as "neighbourhood, city" (for example "Colaba, Mumbai"), using only areas stated in this input, including hashtags. Otherwise null.
 - "date_text": the date as stated, written as YYYY-MM-DD or YYYY-MM-DDTHH:MM. Use today's date to work out a missing year, choosing the next time that date occurs. Otherwise null.
 
 Limits:
