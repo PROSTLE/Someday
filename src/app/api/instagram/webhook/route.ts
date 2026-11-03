@@ -4,15 +4,19 @@ import {
   findLinkCode,
   findVideo,
   isValidSignature,
+  lookupReelVideo,
   sendInstagramMessage,
   type InstagramEvent,
 } from "@/lib/pipeline/instagram";
-import { isInstagramMediaUrl } from "@/lib/pipeline/media";
+import { isInstagramMediaUrl, isInstagramPageUrl } from "@/lib/pipeline/media";
 import { processReel } from "@/lib/pipeline/process";
 import { assertDailyLimit } from "@/lib/pipeline/usage";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const maxDuration = 300;
+
+const NO_CONTENT_ERROR =
+  "Instagram didn’t share this Reel’s video and it has no caption, so Tick can’t tell what it’s about.";
 
 export function GET(request: Request) {
   const params = new URL(request.url).searchParams;
@@ -78,20 +82,31 @@ async function handleEvent(event: InstagramEvent) {
     return;
   }
 
-  const mediaUrl = video.payload?.url;
-  const usable = mediaUrl && isInstagramMediaUrl(mediaUrl);
+  // A shared Reel's `url` is its public instagram.com page, not a video file. Ask Meta's API for
+  // the video by `reel_video_id`; if Meta refuses, Tick works from the caption and note instead.
+  const link = video.payload?.url;
+  let mediaUrl = link && isInstagramMediaUrl(link) ? link : null;
+  if (!mediaUrl && video.payload?.reel_video_id) {
+    const found = await lookupReelVideo(video.payload.reel_video_id);
+    if (found && isInstagramMediaUrl(found)) mediaUrl = found;
+  }
+  const caption = video.payload?.title?.trim() || null;
+  const note = message.text?.trim() || null;
+  const pageLink = link && isInstagramPageUrl(link) ? link : null;
+  // Even with no video or caption, the Reel's page link lets Tick research it.
+  const usable = Boolean(mediaUrl || caption || note || pageLink);
   const { data: reel, error } = await admin
     .from("reels")
     .upsert(
       {
         user_id: profile.id,
         message_id: message.mid,
-        source_url: null,
-        caption: video.payload?.title ?? null,
-        note: message.text?.trim() || null,
-        media_url: usable ? mediaUrl : null,
+        source_url: pageLink,
+        caption,
+        note,
+        media_url: mediaUrl,
         status: usable ? "received" : "failed",
-        error: usable ? null : "Instagram didn’t include the video. Try a screen recording of the Reel.",
+        error: usable ? null : NO_CONTENT_ERROR,
       },
       { onConflict: "message_id", ignoreDuplicates: true },
     )
@@ -100,7 +115,7 @@ async function handleEvent(event: InstagramEvent) {
   if (error) throw new Error(`Reel save failed: ${error.message}`);
   // No row means this message was already handled.
   if (reel && usable) await processReel(reel.id);
-  if (reel && !usable) await sendInstagramMessage(senderId, "I couldn’t get that video. Try sending a screen recording.");
+  if (reel && !usable) await sendInstagramMessage(senderId, NO_CONTENT_ERROR);
 }
 
 export async function POST(request: Request) {
@@ -112,12 +127,16 @@ export async function POST(request: Request) {
   const payload = JSON.parse(rawBody) as { entry?: { messaging?: InstagramEvent[] }[] };
   const events = (payload.entry ?? []).flatMap((entry) => entry.messaging ?? []);
 
-  after(async () => {
-    for (const event of events) {
-      await handleEvent(event).catch((error) =>
-        console.error("Webhook event failed:", error instanceof Error ? error.message : error),
-      );
-    }
-  });
+  // Meta batches messages sent close together, like several Reels forwarded at once. Each one
+  // takes up to ~280 seconds, so they run side by side to all finish inside the 300-second limit.
+  after(() =>
+    Promise.all(
+      events.map((event) =>
+        handleEvent(event).catch((error) =>
+          console.error("Webhook event failed:", error instanceof Error ? error.message : error),
+        ),
+      ),
+    ),
+  );
   return NextResponse.json({ received: true });
 }

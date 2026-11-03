@@ -22,13 +22,22 @@ export type PeopleSay = {
   sources: { label: string; url: string }[];
 };
 
+export type WatchProvider = { name: string; logo: string | null; kind: "stream" | "rent" | "buy"; url: string | null };
+
 export type WatchOptions = {
   region: string;
   link: string | null;
   stream: string[];
   rent: string[];
   buy: string[];
+  providers?: WatchProvider[];
 };
+
+/** A YouTube video confirmed to exist through YouTube's oEmbed endpoint. */
+export type Video = { id: string; title: string; channel: string };
+/** A freely licensed photo from Wikimedia Commons, shown with its credit. */
+export type Photo = { url: string; credit: string; license: string; page: string };
+export type StartLink = { label: string; url: string; site: string };
 
 export type CastMember = { name: string; character: string | null; photo: string | null };
 export type ReviewQuote = { author: string; rating: number | null; excerpt: string; url: string | null };
@@ -81,6 +90,16 @@ export type ItemData = {
   price?: string;
   url?: string;
   points?: string[];
+  videos?: Video[];
+  video_search?: string;
+  start?: StartLink;
+  effort?: string;
+  photos?: Photo[];
+  about?: { text: string; url: string };
+  equipment?: string[];
+  ingredients_from?: "reel" | "web";
+  recipe_url?: string;
+  total_time?: string;
 };
 
 export type List = {

@@ -47,7 +47,8 @@ export default async function AppLayout({ children }: LayoutProps<"/app">) {
       </aside>
 
       <header className="sticky top-0 z-20 border-b border-edge bg-card">
-        <div className="mx-auto flex h-[72px] w-full max-w-[1160px] items-center gap-3 px-4 lg:px-10">
+        {/* Full width, so the actions sit at the window's right edge rather than the content column's. */}
+        <div className="flex h-[72px] w-full items-center gap-3 px-4 lg:px-8">
           <span className="lg:hidden">
             <Logo href="/app" />
           </span>

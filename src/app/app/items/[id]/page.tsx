@@ -2,57 +2,19 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AutoEnrich, TitlePicker } from "@/components/EnrichControls";
 import { CookMode } from "@/components/CookMode";
-import { CopyButton } from "@/components/CopyButton";
 import { Icon, VIEW_ICONS } from "@/components/Icon";
 import { ItemEditor } from "@/components/ItemEditor";
+import { DoItNow, Lessons, PlacePhotos, RecipeKit, WatchProviders } from "@/components/ItemExtras";
 import { PlanSteps } from "@/components/PlanSteps";
 import { RemoteImage } from "@/components/RemoteImage";
 import { StepList } from "@/components/StepList";
 import { Tick } from "@/components/Tick";
-import { buttonClass } from "@/components/ui";
 import { MapView } from "@/components/views/MapView";
-import { calendarUrl, directionsUrl } from "@/lib/links";
 import { requireUser } from "@/lib/supabase/server";
 import { ITEM_SELECT, type Item, type ItemData, type List } from "@/lib/types";
 
 const external = "inline-flex min-h-11 items-center underline";
 const sectionTitle = "font-serif text-[22px]";
-
-function NextActions({ item }: { item: Item }) {
-  const { data } = item;
-  const hasPlace = Boolean(data.address || (data.lat !== undefined && data.lng !== undefined));
-  const actions = [
-    data.trailer_key && { label: "Watch trailer", href: `https://www.youtube.com/watch?v=${data.trailer_key}`, icon: "play" },
-    data.watch?.link && { label: "Where to watch", href: data.watch.link, icon: "film" },
-    data.imdb_url && { label: "Open on IMDb", href: data.imdb_url, icon: "arrow" },
-    hasPlace && { label: "Directions", href: directionsUrl(item), icon: "pin" },
-    data.url && { label: data.preview_url ? "Open in Apple Music" : "Find it", href: data.url, icon: "bag" },
-    item.due_at && { label: "Add to calendar", href: calendarUrl(item), icon: "calendar" },
-  ].filter(Boolean) as { label: string; href: string; icon: string }[];
-
-  if (!data.next_step && actions.length === 0) return null;
-  return (
-    <section className="mt-6 rounded-[14px] bg-t-mint p-5">
-      <p className="eyebrow">What to do next</p>
-      {data.next_step && <p className="mt-1 font-serif text-[22px] leading-snug">{data.next_step}</p>}
-      {actions.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {actions.map((action, index) => (
-            <a
-              key={action.label}
-              href={action.href}
-              target="_blank"
-              rel="noreferrer"
-              className={buttonClass(index === 0 ? "primary" : "secondary")}
-            >
-              <Icon name={action.icon} size={20} /> {action.label}
-            </a>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
 
 function Facts({ data }: { data: ItemData }) {
   if (!data.facts?.length) return null;
@@ -74,29 +36,6 @@ function Facts({ data }: { data: ItemData }) {
           </div>
         ))}
       </dl>
-    </section>
-  );
-}
-
-function WatchOn({ data }: { data: ItemData }) {
-  const { watch } = data;
-  if (!watch) return null;
-  const groups = [["Stream", watch.stream], ["Rent", watch.rent], ["Buy", watch.buy]] as const;
-  const available = groups.some(([, names]) => names.length > 0);
-  const country = new Intl.DisplayNames(["en"], { type: "region" }).of(watch.region) ?? watch.region;
-  return (
-    <section className="mt-7">
-      <h2 className={sectionTitle}>Where to watch in {country}</h2>
-      <div className="mt-2 flex flex-col gap-2">
-        {groups.filter(([, names]) => names.length).map(([label, names]) => (
-          <p key={label}>
-            <span className="text-muted">{label}: </span>
-            <span className="font-medium">{names.join(", ")}</span>
-          </p>
-        ))}
-      </div>
-      {!available && <p className="mt-2">No streaming, rental or purchase option is listed for {country} right now.</p>}
-      <p className="mt-1 text-sm text-muted">Availability data from JustWatch.</p>
     </section>
   );
 }
@@ -205,15 +144,16 @@ export default async function ItemPage(props: PageProps<"/app/items/[id]">) {
   const pinned = typeof data.lat === "number" && typeof data.lng === "number";
   const planIds = data.plan?.map((step) => step.item_id) ?? [];
   const steps = data.steps ?? [];
+  const hero = data.backdrop_url ?? data.photos?.[0]?.url;
 
   return (
     <article className="max-w-3xl">
       <div data-surface className="paper overflow-hidden">
-        {data.backdrop_url && <RemoteImage src={data.backdrop_url} alt="" className="h-44 w-full object-cover sm:h-64" />}
+        {hero && <RemoteImage src={hero} alt="" className="h-44 w-full object-cover sm:h-64" />}
         <div className="p-6 sm:p-8">
         {!data.enriched_at && !data.plan && <AutoEnrich id={item.id} />}
         {data.candidates && <TitlePicker id={item.id} candidates={data.candidates} />}
-        <div className={`flex flex-col gap-5 sm:flex-row ${data.backdrop_url ? "-mt-20 sm:-mt-24" : ""}`}>
+        <div className={`flex flex-col gap-5 sm:flex-row ${hero && data.image_url ? "-mt-20 sm:-mt-24" : ""}`}>
           {data.image_url ? (
             <RemoteImage src={data.image_url} alt="" className="w-36 self-start rounded-[10px] shadow-md sm:w-44" />
           ) : (
@@ -221,7 +161,7 @@ export default async function ItemPage(props: PageProps<"/app/items/[id]">) {
               <Icon name={VIEW_ICONS[item.lists?.view ?? "fallback"]} size={30} />
             </span>
           )}
-          <div className={`min-w-0 ${data.backdrop_url ? "sm:pt-28" : ""}`}>
+          <div className={`min-w-0 ${hero && data.image_url ? "sm:pt-28" : ""}`}>
             {item.lists ? (
               <Link href={`/app/lists/${item.lists.slug}`} className="eyebrow hover:underline">{item.lists.name}</Link>
             ) : (
@@ -262,13 +202,16 @@ export default async function ItemPage(props: PageProps<"/app/items/[id]">) {
           </section>
         )}
 
-        <NextActions item={item} />
+        <DoItNow item={item} />
+        <WatchProviders data={data} title={item.title} />
+        <Lessons data={data} title={item.title} />
+        <PlacePhotos data={data} />
+        <RecipeKit data={data} />
 
         {data.plan && data.plan.length > 0 && <PlanSteps steps={data.plan} itemIds={planIds} />}
 
         <Facts data={data} />
         <CastRow data={data} />
-        <WatchOn data={data} />
 
         {data.trailer_key && (
           <section className="mt-7">
@@ -292,16 +235,6 @@ export default async function ItemPage(props: PageProps<"/app/items/[id]">) {
           <section className="mt-7">
             <h2 className={sectionTitle}>Preview</h2>
             <audio controls preload="none" src={data.preview_url} className="mt-2 w-full" />
-          </section>
-        )}
-
-        {data.ingredients && data.ingredients.length > 0 && (
-          <section className="mt-7">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className={sectionTitle}>Ingredients</h2>
-              <CopyButton value={data.ingredients.join("\n")} label="Copy grocery list" />
-            </div>
-            <ul className="mt-1 list-disc pl-5">{data.ingredients.map((value) => <li key={value}>{value}</li>)}</ul>
           </section>
         )}
 

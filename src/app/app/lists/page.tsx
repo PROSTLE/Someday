@@ -1,8 +1,7 @@
 import Link from "next/link";
 import { createList } from "@/app/app/actions";
-import { Icon, VIEW_ICONS } from "@/components/Icon";
+import { ListCover, toCoverItem } from "@/components/ListCover";
 import { EmptyState, PageTitle, buttonClass } from "@/components/ui";
-import { RemoteImage } from "@/components/RemoteImage";
 import { coverUrls } from "@/lib/pipeline/covers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireUser } from "@/lib/supabase/server";
@@ -10,9 +9,15 @@ import { VIEWS, VIEW_LABELS, type List } from "@/lib/types";
 
 export default async function Lists() {
   const { supabase, user } = await requireUser();
-  const { data, error } = await supabase.from("lists").select("*, items(count)").order("created_at");
+  const { data, error } = await supabase
+    .from("lists")
+    .select(
+      "*, items(id, title, status, needs_review, due_at, created_at, image:data->>image_url, photo:data->photos->0->>url, lat:data->lat, lng:data->lng)",
+    )
+    .order("created_at");
   if (error) throw new Error(error.message);
-  const lists = (data ?? []) as (List & { items: { count: number }[] })[];
+  type Preview = { id: string; title: string; status: string; needs_review: boolean; due_at: string | null; created_at: string; image: unknown; photo: unknown; lat: unknown; lng: unknown };
+  const lists = (data ?? []) as (List & { items: Preview[] })[];
   const covers = await coverUrls(createAdminClient(), user.id);
 
   return (
@@ -24,17 +29,25 @@ export default async function Lists() {
         </EmptyState>
       ) : (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-4">
-          {lists.map((list) => (
-            <Link key={list.id} href={`/app/lists/${list.slug}`} data-surface className="overflow-hidden rounded-[14px] border border-edge bg-card hover:bg-tint">
-              {covers[list.id] ? (
-                <RemoteImage src={covers[list.id]} alt="" className="aspect-video w-full object-cover" />
-              ) : (
-                <span className="flex aspect-video w-full items-center justify-center bg-t-blue"><Icon name={VIEW_ICONS[list.view]} size={30} /></span>
-              )}
-              <h2 className="px-4 pt-3 font-serif text-[22px]">{list.name}</h2>
-              <p className="px-4 pb-4 text-sm text-muted">{list.items[0]?.count ?? 0} items</p>
-            </Link>
-          ))}
+          {lists.map((list, index) => {
+            const open = list.items
+              .filter((item) => item.status === "todo" && !item.needs_review)
+              .sort((a, b) => b.created_at.localeCompare(a.created_at));
+            return (
+              <Link
+                key={list.id}
+                href={`/app/lists/${list.slug}`}
+                data-surface
+                className="group overflow-hidden rounded-[14px] border border-edge bg-card transition-shadow hover:shadow-lg focus-visible:shadow-lg"
+              >
+                <ListCover view={list.view} index={index} fallback={covers[list.id]} items={open.map((item) => toCoverItem({ ...item, image: item.image ?? item.photo }))} />
+                <h2 className="px-4 pt-3 font-serif text-[22px]">{list.name}</h2>
+                <p className="px-4 pb-4 text-sm text-muted">
+                  {open.length} to do{list.items.length > open.length ? ` · ${list.items.length - open.length} done or waiting` : ""}
+                </p>
+              </Link>
+            );
+          })}
         </div>
       )}
 

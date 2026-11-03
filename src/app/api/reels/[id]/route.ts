@@ -10,7 +10,11 @@ async function ownedReel(id: string) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
   // Row-level security limits this to the signed-in person's Reels.
-  const { data } = await supabase.from("reels").select("id, status, media_path, media_url").eq("id", id).maybeSingle();
+  const { data } = await supabase
+    .from("reels")
+    .select("id, status, media_path, media_url, caption, note, source_url")
+    .eq("id", id)
+    .maybeSingle();
   return data;
 }
 
@@ -19,7 +23,8 @@ export async function POST(_request: Request, context: RouteContext<"/api/reels/
   const reel = await ownedReel(id);
   if (!reel) return NextResponse.json({ error: "Reel not found." }, { status: 404 });
   if (reel.status !== "failed") return NextResponse.json({ error: "This Reel isn’t waiting for a retry." }, { status: 409 });
-  if (!reel.media_path && !reel.media_url) {
+  // Shared Reels can be retried from their caption, note or page link alone.
+  if (!reel.media_path && !reel.media_url && !reel.caption?.trim() && !reel.note?.trim() && !reel.source_url) {
     return NextResponse.json({ error: "The video is gone. Please send it again." }, { status: 410 });
   }
 

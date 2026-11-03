@@ -2,6 +2,7 @@ import "server-only";
 import { VIEWS, type View } from "@/lib/types";
 import type { PipelineConfig } from "./config";
 import { createResponse, type ModelUsage } from "./meta";
+import type { ReelResearch } from "./research";
 
 export const MAX_ITEMS_PER_REEL = 30;
 
@@ -13,7 +14,7 @@ export type ExtractedItem = {
   title: string;
   summary: string | null;
   evidence: string;
-  evidence_source: "visual" | "speech" | "on_screen_text" | "caption" | "note";
+  evidence_source: "visual" | "speech" | "on_screen_text" | "caption" | "note" | "web";
   confidence: "high" | "medium" | "low";
   lookup: Lookup;
   place_area: string | null;
@@ -59,7 +60,7 @@ const SCHEMA = {
           title: { type: "string" },
           summary: nullableString,
           evidence: { type: "string" },
-          evidence_source: { type: "string", enum: ["visual", "speech", "on_screen_text", "caption", "note"] },
+          evidence_source: { type: "string", enum: ["visual", "speech", "on_screen_text", "caption", "note", "web"] },
           confidence: { type: "string", enum: ["high", "medium", "low"] },
           lookup: { type: "string", enum: ["none", "title", "book", "music", "place", "date", "product"] },
           place_area: nullableString,
@@ -118,6 +119,7 @@ Lists and views:
 
 Lookups:
 - "title": a film or show. "book": a book. "music": a song. "place": a specific named place. "date": something with a deadline or date.
+- For films, shows and books, "title" is the official title alone: never add a year, season, episode or part number. Put those in "summary", e.g. title "Stranger Things", summary "Season 2 of the Netflix series (2017)".
 - "product": a specific named product. Otherwise "none".
 - "place_area": the city or area, only if stated.
 - "date_text": the date as stated, written as YYYY-MM-DD or YYYY-MM-DDTHH:MM. Use today's date to work out a missing year, choosing the next time that date occurs. Otherwise null.
@@ -127,13 +129,42 @@ Limits:
 
 export async function extractItems(
   config: PipelineConfig,
-  input: { fileId: string; caption: string | null; note: string | null; listNames: string[] },
+  input: {
+    fileId: string | null;
+    /** The picture from a shared photo post, as a data URL. */
+    image?: string | null;
+    caption: string | null;
+    note: string | null;
+    listNames: string[];
+    research?: ReelResearch | null;
+  },
   signal: AbortSignal,
 ): Promise<Extraction & { usage: ModelUsage }> {
+  const research = input.research;
   const context = [
     `Existing lists: ${input.listNames.length ? JSON.stringify(input.listNames) : "none yet"}`,
     `Caption: ${input.caption ? JSON.stringify(input.caption) : "none"}`,
     `Person's note: ${input.note ? JSON.stringify(input.note) : "none"}`,
+    ...(research
+      ? [
+          `Web research about this Reel (data from Meta web search): ${JSON.stringify(research)}`,
+        ]
+      : []),
+    ...(input.fileId
+      ? []
+      : input.image
+        ? [
+            "Video: none. This is a photo post, and its picture is attached. Read the picture as you would a video " +
+              'frame: use "visual" or "on_screen_text" for what it shows, and "caption" or "note" for the text. A poster ' +
+              "or title card names the film, book or place it shows.",
+          ]
+        : [
+          "Video: not available. Instagram shared only the caption and a link. Work from the caption, note and " +
+            'web research: evidence_source must be "caption", "note" or "web", and never invent what the video shows. ' +
+            "Use the research to name things exactly, for example a film's year and cast in the summary, a hackathon's " +
+            'deadline in date_text, or a recipe\'s ingredients. Use "high" confidence when the caption or research names ' +
+            "the thing outright.",
+        ]),
   ].join("\n");
 
   const result = await createResponse(
@@ -149,7 +180,8 @@ export async function extractItems(
           role: "user",
           content: [
             { type: "input_text", text: context },
-            { type: "input_video", file_id: input.fileId },
+            ...(input.fileId ? [{ type: "input_video", file_id: input.fileId }] : []),
+            ...(!input.fileId && input.image ? [{ type: "input_image", image_url: input.image }] : []),
           ],
         },
       ],

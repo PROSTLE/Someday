@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Fact, ItemData, PeopleSay, ReviewQuote, TitleCandidate, WatchOptions } from "@/lib/types";
+import type { Fact, ItemData, PeopleSay, ReviewQuote, TitleCandidate, WatchOptions, WatchProvider } from "@/lib/types";
 import type { PipelineConfig } from "./config";
 import type { ExtractedItem } from "./extract";
 import { ModelIncompleteError, createResponse, type ModelUsage } from "./meta";
@@ -55,9 +55,10 @@ type TmdbResult = {
   release_date?: string;
   first_air_date?: string;
   vote_average?: number;
+  vote_count?: number;
 };
 
-type TmdbProvider = { provider_name?: string };
+type TmdbProvider = { provider_name?: string; logo_path?: string | null; display_priority?: number };
 type TmdbRegion = { link?: string; flatrate?: TmdbProvider[]; rent?: TmdbProvider[]; buy?: TmdbProvider[]; free?: TmdbProvider[]; ads?: TmdbProvider[] };
 
 type TmdbDetails = {
@@ -94,12 +95,63 @@ function formatRuntime(details: TmdbDetails) {
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
 }
 
+// Search pages on each service, so one tap lands on the title. Others fall back to JustWatch via TMDB.
+const PROVIDER_SEARCH: [RegExp, (title: string) => string][] = [
+  [/^netflix/i, (t) => `https://www.netflix.com/search?q=${encodeURIComponent(t)}`],
+  [/prime video|amazon video/i, (t) => `https://www.primevideo.com/search?phrase=${encodeURIComponent(t)}`],
+  [/hotstar/i, (t) => `https://www.hotstar.com/in/explore?search_query=${encodeURIComponent(t)}`],
+  [/apple tv/i, (t) => `https://tv.apple.com/search?term=${encodeURIComponent(t)}`],
+  [/^youtube/i, (t) => `https://www.youtube.com/results?search_query=${encodeURIComponent(`${t} full movie`)}`],
+  [/zee5/i, (t) => `https://www.zee5.com/search?q=${encodeURIComponent(t)}`],
+  [/google play/i, (t) => `https://play.google.com/store/search?c=movies&q=${encodeURIComponent(t)}`],
+];
+
+// "Prime Video with Ads" and friends are the same app as the main service.
+const VARIANT = /\s+(free with ads|standard with ads|basic with ads|with ads|amazon channel|channel)$/i;
+
+function providerList(entry: TmdbRegion, title: string, fallback: string | null): WatchProvider[] {
+  const seen = new Set<string>();
+  const groups: [WatchProvider["kind"], TmdbProvider[]][] = [
+    ["stream", [...(entry.flatrate ?? []), ...(entry.free ?? []), ...(entry.ads ?? [])]],
+    ["rent", entry.rent ?? []],
+    ["buy", entry.buy ?? []],
+  ];
+  return groups.flatMap(([kind, list]) =>
+    [...list]
+      .sort((a, b) => (a.display_priority ?? 99) - (b.display_priority ?? 99))
+      .flatMap((provider) => {
+        const name = provider.provider_name?.replace(VARIANT, "").trim();
+        if (!name || seen.has(name.toLowerCase())) return [];
+        seen.add(name.toLowerCase());
+        const search = PROVIDER_SEARCH.find(([pattern]) => pattern.test(name))?.[1];
+        return [{
+          name,
+          kind,
+          logo: provider.logo_path ? `https://image.tmdb.org/t/p/w92${provider.logo_path}` : null,
+          url: search ? search(title) : fallback,
+        }];
+      }),
+  );
+}
+
 function watchOptions(details: TmdbDetails, region: string): WatchOptions {
   const entry = details["watch/providers"]?.results?.[region] ?? {};
   const stream = providerNames([...(entry.flatrate ?? []), ...(entry.free ?? []), ...(entry.ads ?? [])]);
   const rent = providerNames(entry.rent);
   const buy = providerNames(entry.buy);
-  return { region, link: safeHttpsUrl(entry.link), stream, rent, buy };
+  const link = safeHttpsUrl(entry.link);
+  const title = details.title ?? details.name ?? "";
+  return { region, link, stream, rent, buy, providers: providerList(entry, title, link) };
+}
+
+/** Refreshes where-to-watch for a saved title, using the TMDB page in its watch link. */
+export async function refreshWatch(config: PipelineConfig, watchLink: string, signal: AbortSignal) {
+  const match = watchLink.match(/themoviedb\.org\/(movie|tv)\/(\d+)/);
+  if (!match) return null;
+  const params = new URLSearchParams({ api_key: config.tmdbKey, append_to_response: "watch/providers" });
+  const response = await fetch(`${TMDB_API}/${match[1]}/${match[2]}?${params}`, { signal });
+  if (!response.ok) return null;
+  return watchOptions((await response.json()) as TmdbDetails, config.tmdbRegion);
 }
 
 async function summariseReviews(
@@ -330,6 +382,34 @@ async function chooseCandidate(config: PipelineConfig, item: ExtractedItem, cand
   return { match: candidates.find((candidate) => String(candidate.id) === matchId) ?? null, usage: result.usage };
 }
 
+/**
+ * Models sometimes write "Bhagam Bhag (2006)" or "Stranger Things Season 2". TMDB needs the bare
+ * title, so split off a trailing year, and note a trailing season so the show can be found.
+ */
+function splitTitle(raw: string) {
+  let title = raw.trim();
+  let year: number | null = null;
+  const yearMatch = title.match(/\s*[([]\s*((?:19|20)\d{2})\s*[)\]]\s*$/);
+  if (yearMatch) {
+    year = Number(yearMatch[1]);
+    title = title.slice(0, yearMatch.index).trim();
+  }
+  const seasonMatch = title.match(/^(.+?)\s*(?:[:\-–]\s*)?(?:season\s*\d+|s\d{1,2}|\d{1,2})$/i);
+  const season = seasonMatch && seasonMatch[1].trim().length > 1 ? { show: seasonMatch[1].trim() } : null;
+  return { title, year, season };
+}
+
+/**
+ * When nothing in the Reel tells same-named titles apart, people almost always mean the famous
+ * one. Pick it only when it has at least five times the votes of the runner-up; otherwise ask.
+ */
+function clearFavourite(candidates: TmdbResult[]) {
+  const ranked = [...candidates].sort((a, b) => (b.vote_count ?? 0) - (a.vote_count ?? 0));
+  const [first, second] = ranked;
+  const top = first?.vote_count ?? 0;
+  return top >= 100 && top >= 5 * (second?.vote_count ?? 0) ? first : null;
+}
+
 /** Facts come from TMDB only. The title must match exactly, or nothing is added. */
 export async function lookupTitle(
   config: PipelineConfig,
@@ -337,17 +417,30 @@ export async function lookupTitle(
   signal: AbortSignal,
 ): Promise<{ data: ItemData; ambiguous: boolean; usages: ModelUsage[] }> {
   if (!config.tmdbKey) return { data: {}, ambiguous: false, usages: [] };
-  const params = new URLSearchParams({ api_key: config.tmdbKey, query: item.title, include_adult: "false" });
-  const response = await fetch(`${TMDB_API}/search/multi?${params}`, { signal });
-  if (!response.ok) throw new Error(`TMDB search failed with HTTP ${response.status}`);
+  const { title, year, season } = splitTitle(item.title);
+  const search = async (query: string) => {
+    const params = new URLSearchParams({ api_key: config.tmdbKey!, query, include_adult: "false" });
+    const response = await fetch(`${TMDB_API}/search/multi?${params}`, { signal });
+    if (!response.ok) throw new Error(`TMDB search failed with HTTP ${response.status}`);
+    const { results = [] } = (await response.json()) as { results?: TmdbResult[] };
+    const wanted = normalise(query);
+    return results.filter(
+      (result) =>
+        (result.media_type === "movie" || result.media_type === "tv") &&
+        normalise(result.title ?? result.name ?? "") === wanted,
+    );
+  };
 
-  const { results = [] } = (await response.json()) as { results?: TmdbResult[] };
-  const wanted = normalise(item.title);
-  const candidates = results.filter(
-    (result) =>
-      (result.media_type === "movie" || result.media_type === "tv") &&
-      normalise(result.title ?? result.name ?? "") === wanted,
-  );
+  let candidates = await search(title);
+  // "Stranger Things 2" usually means season 2 of the show, so retry without the number.
+  if (candidates.length === 0 && season) {
+    candidates = (await search(season.show)).filter((result) => result.media_type === "tv");
+  }
+  // A year stated in the Reel settles which same-named title it means.
+  if (year && candidates.length > 1) {
+    const sameYear = candidates.filter((candidate) => tmdbYear(candidate) === year);
+    if (sameYear.length > 0) candidates = sameYear;
+  }
 
   if (candidates.length === 0) return { data: {}, ambiguous: false, usages: [] };
   let match: TmdbResult | null = candidates[0];
@@ -355,7 +448,7 @@ export async function lookupTitle(
   if (candidates.length > 1) {
     const chosen = await chooseCandidate(config, item, candidates, signal);
     usages.push(chosen.usage);
-    match = chosen.match;
+    match = chosen.match ?? clearFavourite(candidates);
   }
   if (!match) {
     const options: TitleCandidate[] = candidates.slice(0, MAX_CANDIDATES).map((candidate) => ({
@@ -466,7 +559,7 @@ const QUESTIONS: Record<"place" | "date" | "product", (item: ExtractedItem) => s
   place: (item) =>
     `Find this place: ${JSON.stringify(item.title)}. Area: ${JSON.stringify(item.place_area ?? "unknown")}. In "value", give only the street address. In "details", add up to three short facts of a few words each, such as what it is known for and opening hours, only if the results state them. In "people_say", give one or two short sentences on what visitors say, only if the results include real opinions.`,
   date: (item) =>
-    `Check this date against an official or reliable source. Event: ${JSON.stringify(item.title)}. Date as claimed: ${JSON.stringify(item.date_text)}. In "value", give the confirmed date as YYYY-MM-DD or YYYY-MM-DDTHH:MM. In "details", add short facts such as who can apply and what is needed, only if the results state them. Set "people_say" to null.`,
+    `Check this date against an official or reliable source. Event: ${JSON.stringify(item.title)}. Date as claimed: ${JSON.stringify(item.date_text)}. In "value", give the confirmed date as YYYY-MM-DD or YYYY-MM-DDTHH:MM. In "details", add short facts such as the organiser, who can apply, the theme or problem statement to build for, what to submit, prizes and the registration link, only if the results state them. Set "people_say" to null.`,
   product: (item) =>
     `Find the official product or store page for: ${JSON.stringify(item.title)}. In "value", give the product's exact name. In "details", add short specifications, only if the results state them. In "people_say", give one or two short sentences on what reviewers praise and criticise, only if the results include real opinions.`,
 };

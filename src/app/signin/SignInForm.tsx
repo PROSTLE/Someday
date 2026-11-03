@@ -5,15 +5,16 @@ import { Icon } from "@/components/Icon";
 import { ErrorNote, buttonClass } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 
-export function SignInForm({ initialError }: { initialError?: string }) {
+export function SignInForm({ facebook, initialError }: { facebook: boolean; initialError?: string }) {
   const [error, setError] = useState(initialError);
   const [busy, setBusy] = useState(false);
-  const [showEmail, setShowEmail] = useState(false);
+  // Without Facebook, email is the only way in, so show its form straight away.
+  const [showEmail, setShowEmail] = useState(!facebook);
   const [email, setEmail] = useState("");
   const [sentTo, setSentTo] = useState("");
   const redirectTo = () => `${location.origin}/auth/callback`;
 
-  const facebook = async () => {
+  const signInWithFacebook = async () => {
     setBusy(true);
     setError(undefined);
     const { error } = await createClient().auth.signInWithOAuth({
@@ -46,14 +47,16 @@ export function SignInForm({ initialError }: { initialError?: string }) {
   return (
     <div className="flex w-full flex-col gap-3">
       {error && <ErrorNote message={error} />}
-      <button
-        type="button"
-        onClick={facebook}
-        disabled={busy}
-        className="inline-flex min-h-[52px] items-center justify-center gap-2.5 rounded-[10px] bg-[#1877F2] px-6 font-semibold text-white hover:opacity-90 disabled:opacity-50"
-      >
-        <Icon name="facebook" /> Continue with Facebook
-      </button>
+      {facebook && (
+        <button
+          type="button"
+          onClick={signInWithFacebook}
+          disabled={busy}
+          className="inline-flex min-h-[52px] items-center justify-center gap-2.5 rounded-[10px] bg-[#1877F2] px-6 font-semibold text-white hover:opacity-90 disabled:opacity-50"
+        >
+          <Icon name="facebook" /> Continue with Facebook
+        </button>
+      )}
       {showEmail ? (
         <form onSubmit={sendLink} className="flex flex-col gap-3">
           <label className="text-left text-sm font-medium" htmlFor="email">Email address</label>

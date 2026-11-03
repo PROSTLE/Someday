@@ -6,6 +6,7 @@ import { ListView } from "@/components/views/ListView";
 import { coverUrls } from "@/lib/pipeline/covers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireUser } from "@/lib/supabase/server";
+import { itemVisual } from "@/lib/quick";
 import { ITEM_SELECT, type Item, type List } from "@/lib/types";
 
 export default async function ListPage(props: PageProps<"/app/lists/[slug]">) {
@@ -30,10 +31,20 @@ export default async function ListPage(props: PageProps<"/app/lists/[slug]">) {
   const items = (data ?? []) as Item[];
   const open = items.filter((item) => item.status === "todo").length;
   const cover = (await coverUrls(createAdminClient(), user.id))[list.id];
+  // Real posters and photos from the list beat a generic illustration.
+  const visuals = [...new Set(items.filter((item) => item.status === "todo").map((item) => item.data.backdrop_url ?? itemVisual(item)).filter((url): url is string => Boolean(url)))].slice(0, 5);
 
   return (
     <>
-      {cover && <RemoteImage src={cover} alt="" className="mb-6 h-40 w-full rounded-[14px] object-cover sm:h-52" />}
+      {visuals.length > 0 ? (
+        <div aria-hidden className="mb-6 flex h-40 gap-2 overflow-hidden rounded-[14px] sm:h-52">
+          {visuals.map((url, index) => (
+            <RemoteImage key={url} src={url} alt="" className={`h-full min-w-0 flex-1 object-cover ${index > 2 ? "hidden sm:block" : ""}`} />
+          ))}
+        </div>
+      ) : (
+        cover && <RemoteImage src={cover} alt="" className="mb-6 h-40 w-full rounded-[14px] object-cover sm:h-52" />
+      )}
       <PageTitle title={list.name} sub={`${open} still to do`} />
       {items.length === 0 ? (
         <EmptyState title="Nothing here yet">

@@ -16,7 +16,29 @@ export function isInstagramMediaUrl(value: string) {
   }
 }
 
-function assertMp4(bytes: Uint8Array) {
+/** A public instagram.com page, kept only as the item's source link. It is never downloaded. */
+export function isInstagramPageUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && /(^|\.)instagram\.com$/.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** What Instagram sent: a Reel's video, or the picture from a shared photo post. */
+export type Media = { kind: "video"; blob: Blob } | { kind: "image"; dataUrl: string };
+
+const IMAGE_TYPES: [string, (bytes: Uint8Array) => boolean][] = [
+  ["image/jpeg", (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff],
+  ["image/png", (b) => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47],
+  ["image/webp", (b) => new TextDecoder("latin1").decode(b.subarray(8, 12)) === "WEBP"],
+];
+
+function toMedia(bytes: Buffer): Media {
+  const image = IMAGE_TYPES.find(([, matches]) => matches(bytes));
+  if (image) return { kind: "image", dataUrl: `data:${image[0]};base64,${bytes.toString("base64")}` };
+
   const text = new TextDecoder("latin1").decode(bytes.subarray(4, 12));
   if (!text.startsWith("ftyp")) {
     throw new UserFacingError("That file isn’t a video Tick can read. Please send an MP4.");
@@ -24,6 +46,7 @@ function assertMp4(bytes: Uint8Array) {
   if (text.slice(4) === "qt  ") {
     throw new UserFacingError("That’s a MOV file. Please send an MP4.");
   }
+  return { kind: "video", blob: new Blob([new Uint8Array(bytes)], { type: "video/mp4" }) };
 }
 
 async function readLimited(response: Response) {
@@ -47,11 +70,11 @@ async function readLimited(response: Response) {
   return Buffer.concat(chunks);
 }
 
-export async function loadVideo(
+export async function loadMedia(
   admin: SupabaseClient,
   reel: { media_path: string | null; media_url: string | null },
   signal: AbortSignal,
-): Promise<Blob> {
+): Promise<Media> {
   let bytes: Buffer;
 
   if (reel.media_path) {
@@ -63,14 +86,13 @@ export async function loadVideo(
     const response = await fetch(reel.media_url, { signal, redirect: "follow" });
     if (!isInstagramMediaUrl(response.url)) throw new Error("Refused a redirect to an unknown host");
     if (!response.ok) {
-      throw new UserFacingError("Instagram didn’t give Tick this video. Try a screen recording of the Reel instead.");
+      throw new UserFacingError("Instagram didn’t give Tick this video. Add a note saying what it’s about and send it again.");
     }
     bytes = await readLimited(response);
   } else {
-    throw new UserFacingError("Tick didn’t receive a video. Try a screen recording of the Reel instead.");
+    throw new UserFacingError("Tick didn’t receive a video. Add a note saying what it’s about and send it again.");
   }
 
   if (bytes.length > MAX_VIDEO_BYTES) throw new UserFacingError("That video is too large. The limit is 50 MB.");
-  assertMp4(bytes);
-  return new Blob([new Uint8Array(bytes)], { type: "video/mp4" });
+  return toMedia(bytes);
 }

@@ -6,9 +6,11 @@ import { VIEW_LABELS, type ItemData, type View } from "@/lib/types";
 import { UserFacingError, pipelineConfig, type PipelineConfig } from "./config";
 import { createFoodImage, createListCover } from "./covers";
 import { baseData, enrichItem, type Enrichment, type ReelSummary } from "./enrich";
+import { addResources } from "./resources";
 import { extractItems, type ExtractedItem } from "./extract";
+import { researchReel, type ReelResearch } from "./research";
 import { sendInstagramMessage } from "./instagram";
-import { loadVideo } from "./media";
+import { loadMedia } from "./media";
 import { deleteVideo, uploadVideo } from "./meta";
 import { assertBudget, recordFailedUsage, recordUsage } from "./usage";
 
@@ -17,7 +19,8 @@ const ENRICH_LIMIT_MS = 200_000;
 const STALE_AFTER_MS = 6 * 60_000;
 const MAX_COVERS_PER_REEL = 4;
 const MAX_FOOD_IMAGES_PER_REEL = 2;
-const GENERIC_ERROR = "Something went wrong while reading this Reel. Please retry.";
+const TRAILING_YEAR = /\s*[([]\s*(?:19|20)\d{2}\s*[)\]]\s*$/;
+const GENERIC_ERROR ="Something went wrong while reading this Reel. Please retry.";
 
 type ReelRow = {
   id: string;
@@ -26,6 +29,8 @@ type ReelRow = {
   note: string | null;
   media_path: string | null;
   media_url: string | null;
+  message_id: string | null;
+  source_url: string | null;
   attempts: number;
 };
 
@@ -33,7 +38,8 @@ async function failStaleReels(admin: SupabaseClient) {
   await admin
     .from("reels")
     .update({ status: "failed", error: "This Reel took too long. Please retry.", updated_at: new Date().toISOString() })
-    .eq("status", "watching")
+    // A Reel left "received" was never picked up, for example when its run was cut off.
+    .in("status", ["received", "watching"])
     .lt("updated_at", new Date(Date.now() - STALE_AFTER_MS).toISOString());
 }
 
@@ -53,7 +59,7 @@ async function claimReel(admin: SupabaseClient, reelId: string) {
     .update({ status: "watching", error: null, attempts: current.attempts + 1, updated_at: new Date().toISOString() })
     .eq("id", reelId)
     .eq("status", "received")
-    .select("id, user_id, caption, note, media_path, media_url, attempts")
+    .select("id, user_id, caption, note, media_path, media_url, message_id, source_url, attempts")
     .maybeSingle();
   if (error) throw new Error(`Reel claim failed: ${error.message}`);
   return data as ReelRow | null;
@@ -127,6 +133,20 @@ async function enrichAll(
       await recordFailedUsage(config, admin, error, { userId: reel.user_id, reelId: reel.id, kind: "search" });
       result = { data: baseData(item, summary), dueAt: null, needsReview: true, usages: [] };
     }
+    // Extra help: lessons for skills, photos for places, the full kit for recipes.
+    const roomToSearch = Date.now() - startedAt < ENRICH_LIMIT_MS && searches < config.maxSearchesPerReel;
+    try {
+      const extra = await addResources(config, item, result.data, roomToSearch, signal);
+      const facts = [...(result.data.facts ?? []), ...(extra.data.facts ?? [])];
+      result = {
+        ...result,
+        data: { ...result.data, ...extra.data, ...(facts.length ? { facts } : {}) },
+        usages: [...result.usages, ...extra.usages],
+      };
+      if (extra.usages.length) searches += 1;
+    } catch (error) {
+      console.error(`Extra help failed for reel ${reel.id}:`, error instanceof Error ? error.message : error);
+    }
     if (result.usages.some((usage) => usage.searchQueries > 0)) searches += 1;
     for (const usage of result.usages) {
       await recordUsage(config, admin, { userId: reel.user_id, reelId: reel.id, kind: "search", usage });
@@ -185,21 +205,54 @@ async function run(config: PipelineConfig, admin: SupabaseClient, reel: ReelRow,
   const { data: lists, error: listError } = await admin.from("lists").select("name").eq("user_id", reel.user_id);
   if (listError) throw new Error(`List read failed: ${listError.message}`);
 
-  const video = await loadVideo(admin, reel, signal);
-  const fileId = await uploadVideo(config, video, signal);
+  // Shared Reels often arrive without a video, because Instagram sends only the caption and a page link.
+  // A shared photo post arrives as its picture, which the model reads directly.
+  let fileId: string | null = null;
+  let image: string | null = null;
+  if (reel.media_path || reel.media_url) {
+    try {
+      const media = await loadMedia(admin, reel, signal);
+      if (media.kind === "image") image = media.dataUrl;
+      else fileId = await uploadVideo(config, media.blob, signal);
+    } catch (error) {
+      // An unreadable file shouldn't lose a Reel that still has a caption, note or page to go on.
+      const fallback = reel.caption?.trim() || reel.note?.trim() || reel.source_url;
+      if (!fallback || signal.aborted) throw error;
+      console.error(`Media unusable for reel ${reel.id}, using text instead:`, error instanceof Error ? error.message : error);
+    }
+  }
+
+  // Without the video, research the Reel's public page and the things it mentions.
+  let research: ReelResearch | null = null;
+  if (!fileId && reel.source_url) {
+    try {
+      const found = await researchReel(config, { link: reel.source_url, caption: reel.caption, note: reel.note }, signal);
+      await recordUsage(config, admin, { userId: reel.user_id, reelId: reel.id, kind: "search", usage: found.usage });
+      research = found.research;
+    } catch (error) {
+      await recordFailedUsage(config, admin, error, { userId: reel.user_id, reelId: reel.id, kind: "search" });
+      console.error(`Research failed for reel ${reel.id}:`, error instanceof Error ? error.message : error);
+    }
+  }
+  if (!fileId && !image && !research && !reel.caption?.trim() && !reel.note?.trim()) {
+    throw new UserFacingError("Tick couldn’t find out what this Reel is about. Try adding a note when you share it.");
+  }
 
   let extracted: Awaited<ReturnType<typeof extractItems>>;
   try {
     extracted = await extractItems(
       config,
-      { fileId, caption: reel.caption, note: reel.note, listNames: (lists ?? []).map((list) => list.name) },
+      { fileId, image, caption: reel.caption, note: reel.note, listNames: (lists ?? []).map((list) => list.name), research },
       signal,
     );
   } catch (error) {
     await recordFailedUsage(config, admin, error, { userId: reel.user_id, reelId: reel.id, kind: "extract" });
     throw error;
   } finally {
-    await deleteVideo(config, fileId).catch((error) => console.error(`Video delete failed for ${fileId}:`, error));
+    if (fileId) {
+      const uploaded = fileId;
+      await deleteVideo(config, uploaded).catch((error) => console.error(`Video delete failed for ${uploaded}:`, error));
+    }
   }
   await recordUsage(config, admin, { userId: reel.user_id, reelId: reel.id, kind: "extract", usage: extracted.usage });
 
@@ -220,7 +273,8 @@ async function run(config: PipelineConfig, admin: SupabaseClient, reel: ReelRow,
       user_id: reel.user_id,
       reel_id: reel.id,
       list_id: listIds[index],
-      title: item.title.trim(),
+      // A film's year belongs in its details, not its name.
+      title: item.lookup === "title" ? item.title.trim().replace(TRAILING_YEAR, "") : item.title.trim(),
       summary: item.summary?.trim() || null,
       evidence: `${item.evidence_source.replaceAll("_", " ")}: ${item.evidence}`,
       data: { ...enrichments[index].data, enriched_at: enrichedAt },
@@ -262,7 +316,8 @@ export async function processReel(reelId: string) {
       .eq("id", reel.id);
     if (error) throw new Error(`Reel update failed: ${error.message}`);
     await removeStoredVideo(admin, reel.media_path);
-    reply = `Saved ${items.length} ${items.length === 1 ? "item" : "items"} from your Reel.`;
+    const count = `${items.length} ${items.length === 1 ? "item" : "items"}`;
+    reply = `Saved ${count} from your Reel.`;
   } catch (error) {
     console.error(`Reel ${reel.id} failed:`, error instanceof Error ? error.message : error);
     const message = error instanceof UserFacingError ? error.message : GENERIC_ERROR;
@@ -273,6 +328,7 @@ export async function processReel(reelId: string) {
     reply = message;
   }
 
-  const instagramId = reel.media_url ? await instagramIdFor(admin, reel.user_id) : null;
+  // Only Reels that came in by DM get a DM back. Web uploads have no message ID.
+  const instagramId = reel.message_id ? await instagramIdFor(admin, reel.user_id) : null;
   if (instagramId) await sendInstagramMessage(instagramId, reply);
 }

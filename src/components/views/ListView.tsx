@@ -1,10 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useTransition } from "react";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
 import { setItemDone } from "@/app/app/actions";
 import type { Item, List } from "@/lib/types";
 import { calendarUrl, directionsUrl } from "@/lib/links";
+import { quickAction, youtubeThumb } from "@/lib/quick";
 import { Bookmark } from "../Bookmark";
 import { Countdown } from "../Countdown";
 import { Icon, VIEW_ICONS } from "../Icon";
@@ -36,6 +38,72 @@ function CardDetails({ item }: { item: Item }) {
   );
 }
 
+/** The one-tap action, so a list is somewhere you start things, not just store them. */
+function CardAction({ item }: { item: Item }) {
+  const action = quickAction(item);
+  const videos = item.data.videos ?? [];
+  if (!action && !videos.length) return null;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      {action && (
+        <a
+          href={action.href}
+          target={action.external ? "_blank" : undefined}
+          rel="noreferrer"
+          className="inline-flex min-h-10 items-center gap-1.5 rounded-full bg-primary px-4 text-sm font-semibold text-on-primary hover:brightness-110"
+        >
+          {action.logo ? <RemoteImage src={action.logo} alt="" className="size-5 rounded" /> : <Icon name={action.icon} size={16} />}
+          {action.label}
+        </a>
+      )}
+      {videos.length > 0 && (
+        <Link href={`/app/items/${item.id}`} className="group inline-flex min-h-10 items-center gap-2 rounded-full border border-edge bg-card py-1 pr-3 pl-1 text-sm font-medium hover:bg-tint">
+          <span className="flex -space-x-2">
+            {videos.slice(0, 3).map((video) => (
+              <RemoteImage key={video.id} src={youtubeThumb(video.id)} alt="" className="size-8 rounded-full border-2 border-card object-cover" />
+            ))}
+          </span>
+          {videos.length} {videos.length === 1 ? "lesson" : "lessons"}
+          {item.data.effort && <span className="text-muted">· {item.data.effort}</span>}
+        </Link>
+      )}
+    </div>
+  );
+}
+
+function PlanTrip({ list }: { list: List }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const plan = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request: `Plan a day-by-day trip itinerary using the places in my "${list.name}" list, in a sensible order.` }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? "Tick couldn’t plan this trip.");
+      router.push(`/app/items/${body.id}`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "Tick couldn’t plan this trip.");
+      setBusy(false);
+    }
+  };
+  return (
+    <div data-surface className="mb-5 flex flex-wrap items-center gap-3 rounded-[14px] bg-t-blue p-4">
+      <Icon name="calendar" />
+      <p className="min-w-0 flex-1"><span className="font-medium">Turn these into a trip.</span> <span className="text-muted">Tick orders your places into a day-by-day plan.</span></p>
+      <button type="button" onClick={plan} disabled={busy} className="inline-flex min-h-11 items-center rounded-full bg-primary px-5 font-semibold text-on-primary disabled:opacity-60">
+        {busy ? "Planning…" : "Plan this trip"}
+      </button>
+      {error && <p className="w-full text-sm text-coral">{error}</p>}
+    </div>
+  );
+}
+
 const titleClass = (item: Item) => `font-medium hover:underline ${item.status === "done" ? "text-muted line-through" : ""}`;
 
 function Poster({ items }: { items: Item[] }) {
@@ -61,24 +129,32 @@ function Poster({ items }: { items: Item[] }) {
             {[item.data.year, item.data.rating !== undefined && `★ ${item.data.rating}`].filter(Boolean).join(" · ")}
           </p>
           {item.data.genres && <p className="truncate text-sm text-muted">{item.data.genres.join(", ")}</p>}
-          {item.data.watch?.stream[0] && <p className="truncate text-sm font-medium">On {item.data.watch.stream[0]}</p>}
+          <CardAction item={item} />
         </article>
       ))}
     </div>
   );
 }
 
-function Places({ items }: { items: Item[] }) {
+function Places({ items, list }: { items: Item[]; list: List }) {
   const pinned = items.filter((i) => typeof i.data.lat === "number" && typeof i.data.lng === "number");
   return (
-    <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+    <>
+    {items.filter((item) => item.status === "todo").length > 1 && <PlanTrip list={list} />}
+    {/* minmax(0, …) stops long place descriptions from widening the grid past the screen. */}
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
       <ul className="flex flex-col gap-2.5">
         {items.map((item) => (
           <li key={item.id} data-surface className="flex items-center gap-2 rounded-xl border border-edge bg-card py-2 pl-2 pr-3">
             <Done item={item} />
+            {item.data.photos?.[0] && (
+              <Link href={`/app/items/${item.id}`} aria-label={`Open ${item.title}`} className="shrink-0">
+                <RemoteImage src={item.data.photos[0].url} alt="" className="size-16 rounded-[10px] object-cover" />
+              </Link>
+            )}
             <div className="min-w-0 flex-1">
               <Link href={`/app/items/${item.id}`} className={`block truncate ${titleClass(item)}`}>{item.title}</Link>
-              <p className="truncate text-sm text-muted">{item.data.place_type ?? item.data.address ?? ""}</p>
+              <p className="truncate text-sm text-muted">{item.data.about?.text ?? item.data.place_type ?? item.data.address ?? ""}</p>
               {item.data.next_step && <p className="truncate text-sm text-teal">→ {item.data.next_step}</p>}
             </div>
             <a
@@ -101,6 +177,7 @@ function Places({ items }: { items: Item[] }) {
         </p>
       )}
     </div>
+    </>
   );
 }
 
@@ -122,6 +199,7 @@ function Steps({ items }: { items: Item[] }) {
             {item.data.ingredients && <p className="mt-2 text-sm text-muted">{item.data.ingredients.length} ingredients</p>}
             {steps.length > 0 && <p className="text-sm text-muted">{done} of {steps.length} steps done</p>}
             <CardDetails item={item} />
+            <CardAction item={item} />
           </article>
         );
       })}
@@ -212,6 +290,7 @@ function Notes({ items, showIcon }: { items: Item[]; showIcon?: boolean }) {
             </ul>
           )}
           <CardDetails item={item} />
+          <CardAction item={item} />
         </article>
       ))}
     </div>
@@ -221,7 +300,7 @@ function Notes({ items, showIcon }: { items: Item[]; showIcon?: boolean }) {
 export function ListView({ list, items }: { list: List; items: Item[] }) {
   switch (list.view) {
     case "poster": return <Poster items={items} />;
-    case "map": return <Places items={items} />;
+    case "map": return <Places items={items} list={list} />;
     case "steps": return <Steps items={items} />;
     case "timeline": return <Timeline items={items} />;
     case "wishlist": return <Wishlist items={items} />;

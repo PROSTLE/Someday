@@ -6,6 +6,7 @@ import { Tick } from "@/components/Tick";
 import { ButtonLink, ErrorNote, SetupNotice, buttonClass } from "@/components/ui";
 import { instagramBot, instagramChatUrl, isSupabaseConfigured } from "@/lib/env";
 import { requireUser } from "@/lib/supabase/server";
+import { LinkWatcher } from "./LinkWatcher";
 
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const newCode = () => `SOME-${[...randomBytes(8)].map((b) => ALPHABET[b % ALPHABET.length]).join("")}`;
@@ -54,6 +55,7 @@ export default async function Connect() {
 
   return (
     <Shell mood="watching" speech="Almost there!">
+      {code && <LinkWatcher userId={user.id} />}
       <p className="eyebrow">Step 2 of 2</p>
       <h1 className="font-serif text-[32px]">Connect your Instagram</h1>
       <p className="text-xl text-muted">So Tick knows which Reels are yours.</p>
@@ -68,7 +70,9 @@ export default async function Connect() {
           <a href={chatUrl} target="_blank" rel="noreferrer" className={`${buttonClass()} mt-5 w-full`}>
             <Icon name="instagram" /> Open chat with Tick
           </a>
-          <p className="mt-2 text-sm text-muted">We’ll open Instagram and link your account automatically.</p>
+          <p className="mt-2 text-sm text-muted">
+            Send Tick the code below there. This page moves on by itself once you’re connected.
+          </p>
         </>
       )}
       {code && instagramBot && (
