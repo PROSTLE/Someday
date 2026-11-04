@@ -1,6 +1,6 @@
 import { quickAction, youtubeThumb, youtubeUrl } from "@/lib/quick";
 import { calendarUrl, directionsUrl } from "@/lib/links";
-import type { Item, ItemData } from "@/lib/types";
+import { VERDICT_LABELS, type ClaimVerdict, type Item, type ItemData } from "@/lib/types";
 import { CopyButton } from "./CopyButton";
 import { Icon } from "./Icon";
 import { RemoteImage } from "./RemoteImage";
@@ -213,6 +213,88 @@ export function RecipeKit({ data }: { data: ItemData }) {
           </ul>
         </>
       )}
+    </section>
+  );
+}
+
+const VERDICT_STYLE: Record<ClaimVerdict, { panel: string; badge: string }> = {
+  false: { panel: "bg-t-pink", badge: "bg-coral text-white" },
+  misleading: { panel: "bg-t-yellow", badge: "bg-yellow text-ink" },
+  unproven: { panel: "bg-t-yellow", badge: "bg-card" },
+  true: { panel: "bg-t-mint", badge: "bg-teal text-white" },
+};
+
+/** What the Reel claimed, what reliable sources say, and links to those sources. */
+export function ClaimCheckPanel({ data }: { data: ItemData }) {
+  const check = data.claim_check;
+  if (!check) return null;
+  const style = VERDICT_STYLE[check.verdict];
+  return (
+    <section className={`mt-6 rounded-[16px] p-5 sm:p-6 ${style.panel}`} aria-label="Fact check">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="eyebrow flex items-center gap-1.5"><Icon name="shield" size={16} />Fact check</p>
+        <span className={`rounded-full px-3 py-1 text-sm font-bold ${style.badge}`}>{VERDICT_LABELS[check.verdict]}</span>
+      </div>
+      <p className="mt-2 text-sm font-medium text-muted">The Reel says</p>
+      <p className="font-serif text-[22px] leading-snug">“{check.claim}”</p>
+      <p className="mt-3 text-sm font-medium text-muted">What the sources say</p>
+      <p>{check.explanation}</p>
+      {check.sources.length > 0 && (
+        <ul className="mt-3 flex flex-wrap gap-2">
+          {check.sources.map((source) => (
+            <li key={source.url}>
+              <a href={source.url} target="_blank" rel="noreferrer" className={`${chip} underline-offset-2 hover:underline`}>
+                <Icon name="shield" size={15} />{source.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-3 text-xs text-muted">
+        Checked {new Date(check.checked_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })} with web search.
+        Every source above is a page the search returned. Read them before you share.
+      </p>
+    </section>
+  );
+}
+
+/** Which consoles and computers a game runs on, and where to get it. */
+export function WhereToPlay({ data }: { data: ItemData }) {
+  const game = data.game;
+  if (!game || (!game.platforms.length && !game.stores.length)) return null;
+  const searches = game.stores.some((store) => store.kind === "search");
+  return (
+    <section className="mt-7">
+      <h2 className={sectionTitle}>Where to play</h2>
+      {game.platforms.length > 0 && (
+        <ul className="mt-3 flex flex-wrap gap-2">
+          {game.platforms.map((platform) => (
+            <li key={platform} className="rounded-full bg-primary px-3 py-1 text-sm font-semibold text-on-primary">{platform}</li>
+          ))}
+        </ul>
+      )}
+      {game.stores.length > 0 && (
+        <ul className="mt-3 flex flex-wrap gap-2">
+          {game.stores.map((store) => (
+            <li key={store.name}>
+              <a
+                href={store.url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex min-h-12 items-center gap-2 rounded-[12px] border border-edge bg-card px-4 font-medium transition hover:-translate-y-0.5 hover:shadow-md"
+              >
+                <Icon name={store.kind === "store" ? "play" : "search"} size={18} />
+                {store.name}
+                {store.name === "Steam" && game.price && <span className="text-sm text-muted">· {game.price}</span>}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-2 text-xs text-muted">
+        Platforms from {game.wikidata ? <a href={game.wikidata} target="_blank" rel="noreferrer" className="underline">Wikidata</a> : "Steam"}.
+        {searches ? " Console store links open a search on that store." : ""}
+      </p>
     </section>
   );
 }

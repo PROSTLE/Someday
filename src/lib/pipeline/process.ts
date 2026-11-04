@@ -35,6 +35,30 @@ type ReelRow = {
   attempts: number;
 };
 
+const BRIEF_SENTENCES = 2;
+const BRIEF_CHARS = 360;
+
+/**
+ * Summaries are asked for in one or two sentences, but a model can occasionally run on for pages.
+ * Keep the first two sentences, and never more than a short paragraph.
+ */
+export function brief(text: string | null | undefined) {
+  const clean = text?.replace(/\s+/g, " ").trim();
+  if (!clean) return null;
+  // A sentence ends at . ! or ? followed by a space or the end, so "2.0" doesn't end one.
+  let cut = clean.length;
+  let count = 0;
+  for (const end of clean.matchAll(/[.!?]+["”’)]*(?=\s|$)/g)) {
+    if (++count === BRIEF_SENTENCES) {
+      cut = end.index + end[0].length;
+      break;
+    }
+  }
+  let out = clean.slice(0, cut);
+  if (out.length > BRIEF_CHARS) out = `${out.slice(0, BRIEF_CHARS - 1).replace(/\s+\S*$/, "")}…`;
+  return out;
+}
+
 async function failStaleReels(admin: SupabaseClient) {
   await admin
     .from("reels")
@@ -114,7 +138,7 @@ async function enrichAll(
   let searches = 0;
 
   for (const item of items) {
-    const needsSearch = item.lookup === "place" || item.lookup === "date" || item.lookup === "product";
+    const needsSearch = ["place", "date", "product", "claim", "game"].includes(item.lookup);
     const inTime = Date.now() - startedAt < ENRICH_LIMIT_MS;
     let allowSearch = needsSearch && inTime && searches < config.maxSearchesPerReel;
     if (allowSearch) {
@@ -268,9 +292,9 @@ async function run(config: PipelineConfig, admin: SupabaseClient, reel: ReelRow,
   if (items.length === 0) throw new UserFacingError("Tick couldn’t find anything to save in this Reel.");
 
   const summary: ReelSummary = {
-    recap: extracted.recap?.trim() || null,
-    commentSummary: extracted.comment_summary?.trim() || null,
-    captionSummary: extracted.caption_summary?.trim() || null,
+    recap: brief(extracted.recap),
+    commentSummary: brief(extracted.comment_summary),
+    captionSummary: brief(extracted.caption_summary),
   };
   const enrichments = await enrichAll(config, admin, reel, items, summary, startedAt, signal);
   const listIds = await listIdsFor(admin, reel.user_id, items);
@@ -296,6 +320,16 @@ async function run(config: PipelineConfig, admin: SupabaseClient, reel: ReelRow,
     addFoodImages(config, admin, reel, saved ?? [], signal),
   ]);
   return (saved ?? []) as Item[];
+}
+
+/** A Reel that spreads something false gets a plain warning in the reply, not just a card. */
+function claimWarning(items: Item[]) {
+  const flagged = items.map((item) => item.data.claim_check).find((check) => check?.verdict === "false" || check?.verdict === "misleading");
+  if (!flagged) return "";
+  const claim = flagged.claim.length > 120 ? `${flagged.claim.slice(0, 117)}…` : flagged.claim;
+  return `
+
+Heads up: “${claim}” looks ${flagged.verdict === "false" ? "false" : "misleading"}. ${flagged.explanation}`;
 }
 
 async function removeStoredVideo(admin: SupabaseClient, path: string | null) {
@@ -331,6 +365,7 @@ export async function processReel(reelId: string) {
     const count = `${ready.length} ${ready.length === 1 ? "thing" : "things"}`;
     reply = ready.length ? `Saved ${count} from your Reel ✓` : "Saved your Reel.";
     if (unsure) reply += ` ${unsure} ${unsure === 1 ? "needs" : "need"} a quick look in the app.`;
+    reply += claimWarning(items);
   } catch (error) {
     console.error(`Reel ${reel.id} failed:`, error instanceof Error ? error.message : error);
     const message = error instanceof UserFacingError ? error.message : GENERIC_ERROR;

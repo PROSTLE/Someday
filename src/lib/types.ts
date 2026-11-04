@@ -53,6 +53,31 @@ export type TitleCandidate = {
 
 export type PlanStep = { time: string; item_id: string; title: string; why: string };
 
+/** Where a video game can be played. Platforms come from Wikidata; store links either come from a store's own API or open a search there. */
+export type GameStore = { name: string; url: string; kind: "store" | "search" };
+export type GameInfo = {
+  platforms: string[];
+  stores: GameStore[];
+  price?: string;
+  wikidata?: string;
+};
+
+/** A checked claim. Every source is a page the web search actually returned. */
+export type ClaimVerdict = "false" | "misleading" | "true" | "unproven";
+export type ClaimCheck = {
+  claim: string;
+  verdict: ClaimVerdict;
+  explanation: string;
+  sources: { label: string; url: string }[];
+  checked_at: string;
+};
+export const VERDICT_LABELS: Record<ClaimVerdict, string> = {
+  false: "Likely false",
+  misleading: "Misleading",
+  true: "Checks out",
+  unproven: "Can’t confirm",
+};
+
 export type ItemData = {
   recap?: string;
   next_step?: string;
@@ -100,6 +125,8 @@ export type ItemData = {
   ingredients_from?: "reel" | "web";
   recipe_url?: string;
   total_time?: string;
+  game?: GameInfo;
+  claim_check?: ClaimCheck;
 };
 
 export type List = {

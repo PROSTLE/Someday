@@ -1,9 +1,9 @@
 import { calendarUrl, directionsUrl } from "./links";
-import type { Item, View } from "./types";
+import { VERDICT_LABELS, type Item, type View } from "./types";
 
 /** The single most useful thing to do with an item, right now. */
 export type QuickAction = {
-  kind: "watch" | "learn" | "go" | "cook" | "date" | "shop" | "open";
+  kind: "watch" | "learn" | "play" | "go" | "cook" | "date" | "shop" | "open";
   label: string;
   /** A two or three word version for small cards. */
   short: string;
@@ -22,6 +22,18 @@ export function quickAction(item: Item): QuickAction | null {
   const { data } = item;
   const view = viewOf(item);
   const page = `/app/items/${item.id}`;
+
+  // A checked claim: the most useful thing is the evidence, before sharing it on.
+  const evidence = data.claim_check?.sources[0];
+  if (evidence) {
+    return { kind: "open", label: "Read the fact check", short: "Sources", href: evidence.url, external: true, icon: "shield" };
+  }
+  // A game: its store page if a store's API confirmed it, else a search on the first store that sells it.
+  const store = data.game?.stores.find((s) => s.kind === "store") ?? data.game?.stores[0];
+  if (store) {
+    const label = store.kind === "store" ? `Get it on ${store.name}` : `Find it on ${store.name}`;
+    return { kind: "play", label, short: store.name.replace(/ Store$/, ""), href: store.url, external: true, icon: "play" };
+  }
 
   const providers = data.watch?.providers ?? [];
   const provider = providers.find((p) => p.kind === "stream" && p.url) ?? providers.find((p) => p.url);
@@ -64,7 +76,17 @@ export function itemVisual(item: Item): string | null {
 export function itemChips(item: Item): string[] {
   const { data } = item;
   const difficulty = data.facts?.find((fact) => fact.label === "Difficulty")?.value;
+  // One name per family on a small card: "PS5 · Xbox · Switch · PC", newest PlayStation first.
+  const families = new Map<string, string>();
+  for (const name of data.game?.platforms ?? []) {
+    const family = name.startsWith("PS") ? "PS" : name.startsWith("Xbox") ? "Xbox" : name.startsWith("Switch") ? "Switch" : name;
+    if (!families.has(family)) families.set(family, family === "PS" ? name : family);
+  }
+  const platforms = [...families.values()].slice(0, 4).join(" · ");
   return [
+    data.claim_check ? VERDICT_LABELS[data.claim_check.verdict] : null,
+    platforms || null,
+    data.game?.price,
     data.effort,
     difficulty,
     data.total_time,
@@ -78,6 +100,7 @@ export const ACTION_GROUPS: { key: QuickAction["kind"] | "all"; label: string }[
   { key: "all", label: "All" },
   { key: "watch", label: "Watch" },
   { key: "learn", label: "Learn" },
+  { key: "play", label: "Play" },
   { key: "go", label: "Go" },
   { key: "cook", label: "Cook" },
   { key: "date", label: "Deadlines" },

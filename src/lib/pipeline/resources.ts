@@ -28,7 +28,7 @@ function httpsUrl(value: unknown) {
 }
 
 /** A video counts only if YouTube confirms it exists, and its real title replaces the model's. */
-async function confirmVideo(url: string, signal: AbortSignal): Promise<Video | null> {
+export async function confirmVideo(url: string, signal: AbortSignal): Promise<Video | null> {
   const id = url.match(YOUTUBE_ID)?.[1];
   if (!id) return null;
   const response = await fetch(
@@ -298,6 +298,8 @@ export async function recipeKit(
 
 /** Which kind of extra help suits an item, judged by its list's view. */
 export function resourceKind(view: View, lookup: string): "learn" | "place" | "recipe" | null {
+  // Games and checked claims already carry their own help.
+  if (lookup === "game" || lookup === "claim") return null;
   if (view === "map" || lookup === "place") return "place";
   if (view === "steps" && lookup !== "title") return "recipe";
   if (view === "notes" || view === "fallback") return "learn";

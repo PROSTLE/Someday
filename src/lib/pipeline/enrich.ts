@@ -1,4 +1,6 @@
 import "server-only";
+import { checkClaim } from "./factcheck";
+import { lookupGame } from "./game";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Fact, ItemData, PeopleSay, ReviewQuote, TitleCandidate, WatchOptions, WatchProvider } from "@/lib/types";
 import type { PipelineConfig } from "./config";
@@ -29,6 +31,9 @@ export type Enrichment = {
   needsReview: boolean;
   usages: ModelUsage[];
 };
+
+/** "The Reel claims that X" becomes "X": the claim is quoted back to people, so it must stand alone. */
+const CLAIM_FRAMING = /^(?:the |this )?(?:reel|video|post|creator|caption)\s+(?:claims|says|states|suggests)\s+(?:that\s+)?/i;
 
 const normalise = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
@@ -777,6 +782,23 @@ export async function enrichItem(
   }
   if (item.lookup === "book") return plain(await lookupBook(item, signal));
   if (item.lookup === "music") return plain(await lookupMusic(config, item, signal));
+  if (item.lookup === "game") {
+    const found = await lookupGame(config, item, allowSearch, signal);
+    return { data: merge(data, found.data), dueAt: stated, needsReview: lowConfidence || !found.found, usages: found.usages };
+  }
+  if (item.lookup === "claim") {
+    // A claim nobody has checked is exactly what shouldn't be passed on, so a person looks at it.
+    if (!allowSearch) return { ...plain({}), needsReview: true };
+    const said = (item.summary?.trim() || item.title).replace(CLAIM_FRAMING, "");
+    const claim = (said.charAt(0).toUpperCase() + said.slice(1)).slice(0, 400);
+    const found = await checkClaim(config, { claim, context: reel.recap }, signal);
+    return {
+      data: merge(data, found.check ? { claim_check: found.check } : {}),
+      dueAt: stated,
+      needsReview: lowConfidence || !found.check,
+      usages: [found.usage],
+    };
+  }
 
   if (item.lookup === "none") {
     return { ...plain({}), needsReview: lowConfidence || Boolean(item.date_text && !stated) };

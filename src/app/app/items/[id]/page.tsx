@@ -4,7 +4,7 @@ import { AutoEnrich, TitlePicker } from "@/components/EnrichControls";
 import { CookMode } from "@/components/CookMode";
 import { Icon, VIEW_ICONS } from "@/components/Icon";
 import { ItemEditor } from "@/components/ItemEditor";
-import { DoItNow, Lessons, PlacePhotos, RecipeKit, WatchProviders } from "@/components/ItemExtras";
+import { ClaimCheckPanel, DoItNow, Lessons, PlacePhotos, RecipeKit, WatchProviders, WhereToPlay } from "@/components/ItemExtras";
 import { PlanSteps } from "@/components/PlanSteps";
 import { RemoteImage } from "@/components/RemoteImage";
 import { StepList } from "@/components/StepList";
@@ -202,8 +202,10 @@ export default async function ItemPage(props: PageProps<"/app/items/[id]">) {
           </section>
         )}
 
+        <ClaimCheckPanel data={data} />
         <DoItNow item={item} />
         <WatchProviders data={data} title={item.title} />
+        <WhereToPlay data={data} />
         <Lessons data={data} title={item.title} />
         <PlacePhotos data={data} />
         <RecipeKit data={data} />

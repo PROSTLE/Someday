@@ -12,6 +12,7 @@ const TILE_TINTS = ["bg-t-yellow", "bg-t-blue", "bg-t-pink", "bg-t-lavender", "b
 const KIND_TINT: Record<QuickAction["kind"], string> = {
   watch: "bg-coral text-white",
   learn: "bg-lavender text-white",
+  play: "bg-primary text-on-primary",
   go: "bg-teal text-white",
   cook: "bg-yellow text-ink",
   date: "bg-sky text-white",

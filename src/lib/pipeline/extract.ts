@@ -6,7 +6,8 @@ import type { ReelResearch } from "./research";
 
 export const MAX_ITEMS_PER_REEL = 30;
 
-export type Lookup = "none" | "title" | "book" | "music" | "place" | "date" | "product";
+export type Lookup = "none" | "title" | "book" | "music" | "game" | "place" | "date" | "product" | "claim";
+export const LOOKUPS: Lookup[] = ["none", "title", "book", "music", "game", "place", "date", "product", "claim"];
 
 export type ExtractedItem = {
   view: View;
@@ -62,7 +63,7 @@ const SCHEMA = {
           evidence: { type: "string" },
           evidence_source: { type: "string", enum: ["visual", "speech", "on_screen_text", "caption", "note", "web"] },
           confidence: { type: "string", enum: ["high", "medium", "low"] },
-          lookup: { type: "string", enum: ["none", "title", "book", "music", "place", "date", "product"] },
+          lookup: { type: "string", enum: LOOKUPS },
           place_area: nullableString,
           date_text: nullableString,
           price: nullableString,
@@ -116,12 +117,13 @@ Lists and views:
 - Every item in a list must share the same view. Never put different kinds of things in one list, even if they came from the same video or the note groups them.
 - poster: films, shows, books, games, music. map: places to visit. steps: recipes, tutorials, routines.
 - timeline: deadlines, events, exams, sales. wishlist: products. gallery: visual inspiration.
-- notes: skills, tips, ideas, facts. fallback: anything else.
+- notes: skills, tips, ideas, facts, and claims to check. fallback: anything else.
 
 Lookups:
-- "title": a film or show. "book": a book. "music": a song. "place": a specific named place. "date": something with a deadline or date.
-- For films, shows and books, "title" is the official title alone: never add a year, season, episode or part number. Put those in "summary", e.g. title "Stranger Things", summary "Season 2 of the Netflix series (2017)".
+- "title": a film or show. "book": a book. "music": a song. "game": a video game. "place": a specific named place. "date": something with a deadline or date.
+- For films, shows, books and games, "title" is the official title alone: never add a year, season, episode or part number. Put those in "summary", e.g. title "Stranger Things", summary "Season 2 of the Netflix series (2017)".
 - "product": a specific named product. Otherwise "none".
+- "claim": the Reel presents a checkable statement about the real world as true, such as news, a scientific or historical fact, a statistic, a quote, or a viral rumour ("NASA confirms...", "Scientists found...", "This law starts on Monday"). Create one item for it, at most two per Reel, in a list named "Fact checks" with the "notes" view. Its "title" is a short neutral name for the claim, its "summary" is the claim itself as one plain sentence in the Reel's own terms, without framing such as "The Reel claims", and "next_step" is "Read the fact check before you share it". Never judge whether the claim is true here. Do not use "claim" for opinions, jokes, adverts, reviews, recipes or tips, or for medical, nutrition, fitness or financial claims, which stay ordinary notes.
 - "place_area": where the place is, as "neighbourhood, city" (for example "Colaba, Mumbai"), using only areas stated in this input, including hashtags. Otherwise null.
 - "date_text": the date as stated, written as YYYY-MM-DD or YYYY-MM-DDTHH:MM. Use today's date to work out a missing year, choosing the next time that date occurs. Otherwise null.
 
